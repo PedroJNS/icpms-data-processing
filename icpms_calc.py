@@ -1,338 +1,505 @@
 """
-==============================================================================
-ICP-MS Data Processing & Streamlit Web App (Agilent 7900)
-Author: Pedro J. (PedroJNS)
-License: GNU General Public License v3.0 (GPL-3.0)
-Description: Web application to upload Agilent 7900 MassHunter files, 
-             input sample digestion data (mass & volume), calculate 
-             real concentrations in solid samples (ppm and %), and 
-             interactively visualize analytical results.
-==============================================================================
+===============================================================================
+Aplicación: Analizador ICP-MS - Concentración (% wt) (Versión Streamlit)
+Desarrollador: Pedro J. Navarrete Segado
+Institución: Universidad de Jaén (UJA)
+Contacto: pnsegado@ujaen.es
+Licencia: GNU General Public License v3.0 (GPL-3.0) (Copyright (c) Pedro J. Navarrete Segado)
+===============================================================================
 """
 
-import warnings
-warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
-
 import io
-import streamlit as st
+import warnings
+import matplotlib.pyplot as plt
+import matplotlib
 import pandas as pd
-import numpy as np
-import plotly.express as px
+import streamlit as st
 
-# -----------------------------------------------------------------------------
-# CONFIGURACIÓN DE LA PÁGINA
-# -----------------------------------------------------------------------------
+# Configuración de página de Streamlit
 st.set_page_config(
-    page_title="Procesador ICP-MS - Agilent 7900",
+    page_title="Analizador ICP-MS - Concentración (% wt)",
     page_icon="🧪",
-    layout="wide"
+    layout="wide",
 )
 
-st.title("🧪 Procesador de Datos ICP-MS (Agilent 7900)")
-st.markdown(
-    "Carga archivos de exportación de **Agilent 7900 MassHunter**, ingresa la masa y volumen "
-    "de digestión para cada muestra y calcula automáticamente las concentraciones reales en sólido (ppm / mg·kg⁻¹)."
+# Ocultar advertencias
+warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
+try:
+  warnings.filterwarnings("ignore", category=pd.errors.PerformanceWarning)
+except AttributeError:
+  pass
+
+
+# --- FUNCIONES DE PROCESAMIENTO ---
+def procesar_archivo_raw(uploaded_file):
+  """Lee el archivo cargado y localiza los encabezados y columnas clave."""
+  if uploaded_file.name.lower().endswith(".csv"):
+    df_raw = pd.read_csv(uploaded_file, header=None)
+  else:
+    excel_obj = pd.ExcelFile(uploaded_file)
+    hoja = (
+        "icpms"
+        if "icpms" in [s.lower() for s in excel_obj.sheet_names]
+        else excel_obj.sheet_names[0]
+    )
+    df_raw = pd.read_excel(excel_obj, sheet_name=hoja, header=None)
+
+  fila_encabezado = None
+  col_sample_idx = None
+  col_type_idx = None
+  col_date_idx = None
+
+  for r_idx, row in df_raw.iterrows():
+    for c_idx, val in enumerate(row):
+      val_str = str(val).strip().lower()
+      if val_str in ["sample name", "nombre muestra"]:
+        fila_encabezado = r_idx
+        col_sample_idx = c_idx
+      elif val_str in ["type", "tipo"]:
+        col_type_idx = c_idx
+      elif any(
+          k in val_str for k in ["acq", "date", "time", "fecha", "hora"]
+      ):
+        col_date_idx = c_idx
+
+    if fila_encabezado is not None:
+      break
+
+  if fila_encabezado is not None:
+    headers = (
+        df_raw.iloc[fila_encabezado].fillna("").astype(str).tolist()
+    )
+    df_data = df_raw.iloc[fila_encabezado + 1 :].copy()
+    df_data.columns = headers
+  else:
+    df_data = df_raw.copy()
+    col_sample_idx = 3
+
+  if (
+      col_date_idx is None
+      and col_type_idx is not None
+      and col_type_idx > 0
+  ):
+    col_date_idx = col_type_idx - 1
+
+  return (
+      df_raw,
+      df_data,
+      fila_encabezado,
+      col_sample_idx,
+      col_type_idx,
+      col_date_idx,
+  )
+
+
+def preparar_mapeo_columnas(df_raw, fila_encabezado, col_sample_idx):
+  """Mapea las columnas de elementos evitando los ISTD."""
+  element_map = {}
+  curr_elem = ""
+  for c_idx in range(df_raw.shape[1]):
+    val0 = str(df_raw.iloc[0, c_idx]).strip()
+    if val0 and val0.lower() != "nan":
+      curr_elem = val0
+    element_map[c_idx] = curr_elem
+
+  cols_interes = []
+  for c_idx in range(df_raw.shape[1]):
+    param = str(df_raw.iloc[fila_encabezado, c_idx]).strip()
+    elem = element_map[c_idx]
+
+    if "( ISTD )" in elem or "istd" in elem.lower():
+      continue
+
+    if c_idx == col_sample_idx:
+      cols_interes.append((c_idx, "Sample Name", False, "none"))
+    elif "conc" in param.lower():
+      unit = "ppm" if "ppm" in param.lower() else "ppb"
+      nombre_elem_clean = (
+          elem.split("[")[0].strip() if "[" in elem else elem.strip()
+      )
+      nombre_elem = (
+          f"{nombre_elem_clean} (% wt)"
+          if nombre_elem_clean
+          else f"Col_{c_idx} (% wt)"
+      )
+      cols_interes.append((c_idx, nombre_elem, True, unit))
+
+  return cols_interes
+
+
+def calcular_resultados(
+    df_data,
+    cols_interes,
+    col_sample_idx,
+    muestras_elegidas,
+    blancos_seleccionados,
+    df_params,
+):
+  """Calcula los promedios de los blancos y las concentraciones reales (% wt)."""
+  # 1. Calcular promedio de blancos en ppb
+  promedio_blancos_ppb = {}
+  if blancos_seleccionados:
+    col_serie = df_data.iloc[:, col_sample_idx].astype(str).str.strip()
+    df_blancos = df_data[col_serie.isin(blancos_seleccionados)]
+
+    for c_idx, _, es_conc, unidad in cols_interes:
+      if es_conc:
+        valores_ppb = []
+        for _, fila in df_blancos.iterrows():
+          v_str = (
+              str(fila.iloc[c_idx])
+              .replace("<", "")
+              .replace(">", "")
+              .replace(",", ".")
+              .strip()
+          )
+          try:
+            val_num = float(v_str)
+            ppb = val_num * 1000.0 if unidad == "ppm" else val_num
+            valores_ppb.append(ppb)
+          except ValueError:
+            pass
+
+        if valores_ppb:
+          promedio_blancos_ppb[c_idx] = sum(valores_ppb) / len(valores_ppb)
+
+  # 2. Recalcular concentraciones (% wt)
+  col_serie = df_data.iloc[:, col_sample_idx].astype(str).str.strip()
+  df_filt = df_data[col_serie.isin(muestras_elegidas)].copy()
+
+  params_dict = df_params.set_index("Sample Name").to_dict(orient="index")
+
+  filas_export = []
+  for _, fila in df_filt.iterrows():
+    nombre_muestra = str(fila.iloc[col_sample_idx]).strip()
+    p_m = params_dict.get(
+        nombre_muestra, {"Masa (mg)": 15.0, "Volumen (mL)": 10.0}
+    )
+
+    masa_mg = float(p_m["Masa (mg)"])
+    vol_ml = float(p_m["Volumen (mL)"])
+
+    row_dict = {
+        "Sample Name": nombre_muestra,
+        "Masa (mg)": masa_mg,
+        "Volumen (mL)": vol_ml,
+    }
+
+    for c_idx, titulo, es_conc, unidad in cols_interes:
+      if es_conc:
+        v_str = (
+            str(fila.iloc[c_idx])
+            .replace("<", "")
+            .replace(">", "")
+            .replace(",", ".")
+            .strip()
+        )
+        try:
+          val_num = float(v_str)
+          ppb = val_num * 1000.0 if unidad == "ppm" else val_num
+          blanco_ppb = promedio_blancos_ppb.get(c_idx, 0.0)
+          ppb_corregido = max(0.0, ppb - blanco_ppb)
+
+          pct = (ppb_corregido * vol_ml) / (masa_mg * 10000.0)
+        except ValueError:
+          pct = 0.0
+
+        row_dict[titulo] = pct
+
+    filas_export.append(row_dict)
+
+  return pd.DataFrame(filas_export)
+
+
+# --- INTERFAZ STREAMLIT ---
+
+# Créditos en Barra Lateral (Sidebar)
+with st.sidebar:
+  st.header("ℹ️ Acerca de")
+  st.markdown("""
+    **Analizador ICP-MS - Concentración (% wt)**  
+    * **Desarrollador:** Pedro J. Navarrete Segado  
+    * **Institución:** Universidad de Jaén (UJA)  
+    * **Contacto:** [pnsegado@ujaen.es](mailto:pnsegado@ujaen.es)  
+    * **Licencia:** GNU General Public License v3.0 (GPL-3.0)  
+    
+    *Copyright (c) Pedro J. Navarrete Segado*
+    """)
+  st.divider()
+  st.caption(
+      "Web application to upload Agilent 7900 MassHunter files, input sample"
+      " digestion data (mass & volume), calculate real concentrations in solid"
+      " samples (ppm and %), and interactively visualize analytical results."
+  )
+
+# Encabezado Principal
+st.title("🧪 Analizador ICP-MS - Concentración (% wt)")
+st.caption(
+    "Desarrollado por Pedro J. Navarrete Segado | Universidad de Jaén (UJA)"
 )
 
-# Límites de referencia por defecto para alertas (ppm)
-LIMITES_REFERENCIA = {
-    "Pb": 10.0,
-    "As": 5.0,
-    "Cd": 1.0,
-    "Hg": 0.5,
-    "Cr": 50.0,
-    "Ni": 20.0,
-    "Cu": 100.0,
-    "Zn": 500.0
-}
-
-# -----------------------------------------------------------------------------
-# FUNCIONES AUXILIARES DE PARSEO DE AGILENT 7900
-# -----------------------------------------------------------------------------
-def parsear_archivo_agilent(uploaded_file):
-    """
-    Lee archivos de Agilent MassHunter detectando automáticamente la fila 
-    de encabezado ("Sample Name") y estructurando los metales detectados.
-    """
-    try:
-        if uploaded_file.name.lower().endswith('.csv'):
-            df_raw = pd.read_csv(uploaded_file, header=None)
-        else:
-            df_raw = pd.read_excel(uploaded_file, header=None)
-
-        header_row = None
-        col_sample_idx = None
-
-        # Localizar la fila que contiene 'Sample Name' o términos equivalentes
-        for r_idx, row in df_raw.iterrows():
-            for c_idx, val in enumerate(row):
-                val_str = str(val).strip().lower()
-                if "sample name" in val_str or val_str == "sample" or "nombre muestra" in val_str:
-                    header_row = r_idx
-                    col_sample_idx = c_idx
-                    break
-            if header_row is not None:
-                break
-
-        if header_row is not None:
-            headers = df_raw.iloc[header_row].fillna("").astype(str).tolist()
-            df_data = df_raw.iloc[header_row + 1:].copy()
-            df_data.columns = headers
-        else:
-            df_data = df_raw.copy()
-            col_sample_idx = 0
-            header_row = 0
-
-        # Construir nombres limpios para las columnas
-        column_titles = []
-        if header_row > 0:
-            element_row = df_raw.iloc[header_row - 1].fillna("").astype(str)
-            param_row = df_raw.iloc[header_row].fillna("").astype(str)
-            
-            current_elem = ""
-            for e, p in zip(element_row, param_row):
-                if e.strip():
-                    current_elem = e.strip()
-                p_str = p.strip()
-                if current_elem and p_str and p_str not in ["Acq. Date-Time", "Type", "Level", "Sample Name"]:
-                    column_titles.append(f"{current_elem}")
-                else:
-                    column_titles.append(p_str)
-        else:
-            column_titles = [str(c).strip() for c in df_data.columns]
-
-        df_data.columns = column_titles
-        return df_raw, df_data, col_sample_idx, header_row
-
-    except Exception as e:
-        st.error(f"Error al analizar la estructura del archivo Agilent: {e}")
-        return None, None, None, None
-
-# -----------------------------------------------------------------------------
-# BARRA LATERAL: CARGA DE DATOS
-# -----------------------------------------------------------------------------
-st.sidebar.header("📁 1. Carga de Archivo")
-uploaded_file = st.sidebar.file_uploader(
-    "Selecciona archivo Agilent 7900 (.xlsx, .xls, .csv)", 
-    type=["xlsx", "xls", "csv"]
+# 1. Cargar Documento
+uploaded_file = st.file_uploader(
+    "1. Cargar Documento (Excel / CSV)", type=["xlsx", "xls", "csv"]
 )
 
 if uploaded_file is not None:
-    df_raw, df_data, col_sample_idx, header_row = parsear_archivo_agilent(uploaded_file)
-    
-    if df_data is not None:
-        col_muestra_nombre = df_data.columns[col_sample_idx]
-        
-        # Filtrar nombres de muestra válidos
-        muestras_series = df_data[col_muestra_nombre].dropna().astype(str).str.strip()
-        muestras_unicas = [m for m in muestras_series.unique() if m and m.lower() not in ["nan", "none", ""]]
+  try:
+    (
+        df_raw,
+        df_data,
+        fila_encabezado,
+        col_sample_idx,
+        col_type_idx,
+        col_date_idx,
+    ) = procesar_archivo_raw(uploaded_file)
+    cols_interes = preparar_mapeo_columnas(
+        df_raw, fila_encabezado, col_sample_idx
+    )
 
-        st.sidebar.markdown("---")
-        st.sidebar.header("🎯 2. Selección de Muestras")
-        
-        seleccionar_todas = st.sidebar.checkbox("Seleccionar todas las muestras", value=True)
-        muestras_seleccionadas = st.sidebar.multiselect(
-            "Muestras a procesar:", 
-            options=muestras_unicas, 
-            default=muestras_unicas if seleccionar_todas else []
+    # Identificar Muestras y Blancos sugeridos
+    palabras_ignorar = [
+        "blank",
+        "blanco",
+        "ppb",
+        "calblk",
+        "calstd",
+        "blkvrfy",
+        "qc",
+        "driftchk",
+        "cicspike",
+        "isostd",
+        "dilstd",
+        "bkgnd",
+        "fqblk",
+    ]
+
+    if col_type_idx is not None and fila_encabezado is not None:
+      val_type = (
+          df_data.iloc[:, col_type_idx]
+          .astype(str)
+          .str.strip()
+          .str.lower()
+      )
+      df_muestras_raw = df_data[val_type == "sample"]
+    else:
+      df_muestras_raw = df_data
+
+    todas_muestras = (
+        df_muestras_raw.iloc[:, col_sample_idx].dropna().astype(str).tolist()
+    )
+
+    muestras_validas = []
+    blancos_detectados = []
+
+    for m in todas_muestras:
+      m_clean = m.strip()
+      m_lower = m_clean.lower()
+      if m_clean and m_lower != "nan":
+        if "blank" in m_lower or "blanco" in m_lower:
+          blancos_detectados.append(m_clean)
+        elif not any(p in m_lower for p in palabras_ignorar):
+          muestras_validas.append(m_clean)
+
+    # Quitar duplicados manteniendo orden
+    muestras_validas = list(dict.fromkeys(muestras_validas))
+    blancos_detectados = list(dict.fromkeys(blancos_detectados))
+
+    st.divider()
+
+    # 2 y 3. Selección de Muestras y Blancos
+    col_sel1, col_sel2 = st.columns(2)
+
+    with col_sel1:
+      muestras_elegidas = st.multiselect(
+          "2. Selecciona las muestras a analizar:",
+          options=muestras_validas,
+          default=muestras_validas,
+      )
+
+    with col_sel2:
+      blancos_seleccionados = st.multiselect(
+          "3. Selecciona los Blancos para restar:",
+          options=blancos_detectados,
+          default=blancos_detectados,
+      )
+
+    if not muestras_elegidas:
+      st.warning("⚠️ Selecciona al menos una muestra para continuar.")
+    else:
+      st.divider()
+      st.subheader("4. Parámetros de Digestión (Masa y Volumen)")
+      st.info(
+          "💡 **Pista:** Puedes editar los valores de Masa y Volumen directamente"
+          " en la tabla a continuación:"
+      )
+
+      # DataFrame editable para Masa y Volumen
+      df_params_init = pd.DataFrame({
+          "Sample Name": muestras_elegidas,
+          "Masa (mg)": [15.0] * len(muestras_elegidas),
+          "Volumen (mL)": [10.0] * len(muestras_elegidas),
+      })
+
+      # st.data_editor permite modificar datos interactivamente
+      df_params_edited = st.data_editor(
+          df_params_init,
+          num_rows="fixed",
+          use_container_width=True,
+          column_config={
+              "Masa (mg)": st.column_config.NumberColumn(
+                  min_value=0.001, format="%.2f"
+              ),
+              "Volumen (mL)": st.column_config.NumberColumn(
+                  min_value=0.001, format="%.2f"
+              ),
+          },
+      )
+
+      # Calcular Resultados
+      df_results = calcular_resultados(
+          df_data,
+          cols_interes,
+          col_sample_idx,
+          muestras_elegidas,
+          blancos_seleccionados,
+          df_params_edited,
+      )
+
+      st.divider()
+      st.subheader("📊 Tabla de Resultados (% wt)")
+
+      # Dar formato legible a la vista
+      df_view = df_results.copy()
+      cols_pct = [c for c in df_view.columns if "% wt" in c]
+
+      for c in cols_pct:
+
+        def fmt_val(val):
+          if val >= 0.000001:
+            return f"{val:.6f}%"
+          elif val > 0:
+            return f"{val:.3e}%"
+          return "-"
+
+        df_view[c] = df_view[c].apply(fmt_val)
+
+      st.dataframe(df_view, use_container_width=True)
+
+      # Botón de exportación a Excel
+      output = io.BytesIO()
+      with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df_results.to_excel(
+            writer, index=False, sheet_name="Resultados_ICP-MS"
         )
+      excel_bytes = output.getvalue()
 
-        # Identificar columnas analíticas
-        cols_no_metales = [col_muestra_nombre, "Acq. Date-Time", "Type", "Level", "Sample No.", ""]
-        posibles_metales = [c for c in df_data.columns if c not in cols_no_metales and not c.startswith("Unnamed")]
+      st.download_button(
+          label="📥 Exportar Resultados a Excel",
+          data=excel_bytes,
+          file_name="Resultados_ICPMS_pct.xlsx",
+          mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+          type="primary",
+      )
 
-        st.sidebar.markdown("---")
-        st.sidebar.header("🔬 3. Selección de Metales")
-        
-        metales_seleccionados = st.sidebar.multiselect(
-            "Elementos a desplegar:",
-            options=posibles_metales,
-            default=posibles_metales
-        )
+      # --- SECCIÓN GRÁFICA ---
+      st.divider()
+      st.subheader("📈 Gráfico de Concentraciones por Metal")
 
-        # -----------------------------------------------------------------------------
-        # SECCIÓN CENTRAL: ENTRADA DE PARÁMETROS DE DIGESTIÓN
-        # -----------------------------------------------------------------------------
-        st.subheader("⚖️ 2. Parámetros de Digestión por Muestra")
-        st.caption("Ingresa la masa de muestra sólida (mg) y el volumen de aforo (mL) para calcular las concentraciones reales.")
+      cols_metales = [c for c in df_results.columns if "% wt" in c]
 
-        if muestras_seleccionadas:
-            # Inicializar dataframe de digestión en session_state si no existe
-            if "df_digestion" not in st.session_state:
-                st.session_state.df_digestion = pd.DataFrame({
-                    "Muestra": muestras_unicas,
-                    "Masa_mg": [100.0] * len(muestras_unicas),
-                    "Volumen_mL": [50.0] * len(muestras_unicas)
-                })
+      if cols_metales:
+        col_g1, col_g2 = st.columns([1, 3])
 
-            # Asegurar que nuevas muestras se agreguen si cambia el archivo
-            missing_samples = set(muestras_unicas) - set(st.session_state.df_digestion["Muestra"])
-            if missing_samples:
-                new_rows = pd.DataFrame({
-                    "Muestra": list(missing_samples),
-                    "Masa_mg": [100.0] * len(missing_samples),
-                    "Volumen_mL": [50.0] * len(missing_samples)
-                })
-                st.session_state.df_digestion = pd.concat([st.session_state.df_digestion, new_rows], ignore_index=True)
+        with col_g1:
+          usar_log = st.checkbox(
+              "Usar escala logarítmica",
+              value=False,
+              help="Útil si hay diferencias de varios órdenes de magnitud entre metales.",
+          )
 
-            with st.expander("📝 Editar Masa (mg) y Volumen (mL) por muestra", expanded=True):
-                st.markdown("**Configuración rápida global:**")
-                c_m1, c_m2, c_m3 = st.columns([2, 2, 2])
-                m_global = c_m1.number_input("Masa global (mg):", value=100.0, step=5.0)
-                v_global = c_m2.number_input("Volumen global (mL):", value=50.0, step=5.0)
-                
-                if c_m3.button("Aplicar a seleccionadas"):
-                    mask = st.session_state.df_digestion["Muestra"].isin(muestras_seleccionadas)
-                    st.session_state.df_digestion.loc[mask, "Masa_mg"] = m_global
-                    st.session_state.df_digestion.loc[mask, "Volumen_mL"] = v_global
-                    st.rerun()
+          nombres_metales = [c.replace(" (% wt)", "") for c in cols_metales]
+          metales_sel = st.multiselect(
+              "Selecciona metales para graficar:",
+              options=nombres_metales,
+              default=nombres_metales[: min(5, len(nombres_metales))],
+          )
 
-                st.markdown("---")
-                
-                # Editor de datos nativo e interactivo en formato tabla
-                df_dig_sub = st.session_state.df_digestion[
-                    st.session_state.df_digestion["Muestra"].isin(muestras_seleccionadas)
-                ].copy()
+        with col_g2:
+          if metales_sel:
+            cols_graficar = [f"{m} (% wt)" for m in metales_sel]
+            df_plot = df_results.set_index("Sample Name")[cols_graficar]
+            df_plot.columns = [
+                c.replace(" (% wt)", "") for c in df_plot.columns
+            ]
 
-                edited_df = st.data_editor(
-                    df_dig_sub,
-                    column_config={
-                        "Muestra": st.column_config.TextColumn("Muestra", disabled=True),
-                        "Masa_mg": st.column_config.NumberColumn("Masa (mg)", min_value=0.0001, step=1.0, format="%.2f mg"),
-                        "Volumen_mL": st.column_config.NumberColumn("Volumen (mL)", min_value=0.0001, step=1.0, format="%.2f mL"),
-                    },
-                    hide_index=True,
-                    use_container_width=True,
-                    key="digestion_editor"
-                )
+            fig, ax = plt.subplots(figsize=(10, 5), dpi=100)
 
-                # Actualizar el estado global con los valores editados
-                for idx, row in edited_df.iterrows():
-                    m_idx = st.session_state.df_digestion["Muestra"] == row["Muestra"]
-                    st.session_state.df_digestion.loc[m_idx, "Masa_mg"] = row["Masa_mg"]
-                    st.session_state.df_digestion.loc[m_idx, "Volumen_mL"] = row["Volumen_mL"]
+            num_metales = len(metales_sel)
+            cmap_dinamico = matplotlib.colormaps["turbo"].resampled(num_metales)
 
-            # -----------------------------------------------------------------------------
-            # CÁLCULO DE CONCENTRACIONES REALES (PPM Y %)
-            # -----------------------------------------------------------------------------
-            df_filtered = df_data[df_data[col_muestra_nombre].astype(str).str.strip().isin(muestras_seleccionadas)].copy()
-            
-            # Unir los datos de digestión con los datos leídos
-            df_dig_map = st.session_state.df_digestion.set_index("Muestra")
-            df_filtered["_Masa"] = df_filtered[col_muestra_nombre].astype(str).str.strip().map(df_dig_map["Masa_mg"]).fillna(100.0)
-            df_filtered["_Volumen"] = df_filtered[col_muestra_nombre].astype(str).str.strip().map(df_dig_map["Volumen_mL"]).fillna(50.0)
+            df_plot.plot(
+                kind="bar",
+                ax=ax,
+                width=0.7,
+                edgecolor="black",
+                linewidth=0.5,
+                colormap=cmap_dinamico,
+            )
 
-            df_ppm = pd.DataFrame()
-            df_ppm[col_muestra_nombre] = df_filtered[col_muestra_nombre]
+            if usar_log:
+              ax.set_yscale("log")
+              ax.set_ylabel(
+                  "Concentración (% wt) - Escala Log",
+                  fontsize=10,
+                  fontweight="bold",
+              )
+            else:
+              ax.set_ylabel(
+                  "Concentración (% wt)", fontsize=10, fontweight="bold"
+              )
 
-            for col in metales_seleccionados:
-                raw_reading = pd.to_numeric(
-                    df_filtered[col].astype(str).str.replace(',', '.'), 
-                    errors='coerce'
-                ).fillna(0.0)
+            ncols = 1 if num_metales <= 10 else (2 if num_metales <= 20 else 3)
+            ax.legend(
+                title="Elementos",
+                bbox_to_anchor=(1.02, 1),
+                loc="upper left",
+                frameon=True,
+                ncol=ncols,
+                fontsize=8,
+                title_fontsize=9,
+            )
 
-                # Cálculo: ppm (mg/kg) = [ppb (µg/L) * Volumen (mL)] / Masa (mg)
-                conc_ppm = (raw_reading * df_filtered["_Volumen"]) / df_filtered["_Masa"]
-                df_ppm[col] = conc_ppm
+            ax.set_title(
+                "Concentración Elemental en Muestras (% wt)",
+                fontsize=12,
+                fontweight="bold",
+                pad=12,
+            )
+            ax.set_xlabel("Muestra", fontsize=10, fontweight="bold")
+            ax.grid(axis="y", linestyle="--", alpha=0.6)
+            plt.xticks(rotation=45, ha="right")
+            fig.tight_layout()
 
-            # -----------------------------------------------------------------------------
-            # VISUALIZACIÓN DE RESULTADOS Y TABLAS
-            # -----------------------------------------------------------------------------
-            st.subheader("📋 3. Resultados Calculados (ppm en Sólido)")
-            
-            with st.expander("👁️ Ver Tabla Completa de Concentraciones Calculadas", expanded=True):
-                st.dataframe(df_ppm.style.format({col: "{:.4f}" for col in metales_seleccionados}), use_container_width=True)
+            st.pyplot(fig)
 
-            if metales_seleccionados:
-                st.subheader("📊 Visualización Gráfica Interactiva")
-                
-                c_opt1, c_opt2 = st.columns(2)
-                tipo_escala = c_opt1.radio("Escala del eje Y:", ["Lineal", "Logarítmica"], horizontal=True)
-                modo_grafico = c_opt2.radio("Tipo de Gráfico:", ["Barras por Muestra", "Perfil de Líneas"], horizontal=True)
+            # Descarga de Imagen PNG
+            img_buf = io.BytesIO()
+            fig.savefig(img_buf, format="png", dpi=300, bbox_inches="tight")
+            img_buf.seek(0)
 
-                df_melted = df_ppm.melt(
-                    id_vars=[col_muestra_nombre], 
-                    value_vars=metales_seleccionados,
-                    var_name="Metal", 
-                    value_name="Concentración (ppm)"
-                )
+            st.download_button(
+                label="💾 Descargar Gráfico como PNG",
+                data=img_buf,
+                file_name="grafico_concentraciones_icpms.png",
+                mime="image/png",
+            )
+            plt.close(fig)
+          else:
+            st.info(
+                "Selecciona al menos un metal en el panel de la izquierda para"
+                " visualizar el gráfico."
+            )
 
-                log_y = True if tipo_escala == "Logarítmica" else False
-
-                if modo_grafico == "Barras por Muestra":
-                    fig = px.bar(
-                        df_melted, 
-                        x=col_muestra_nombre, 
-                        y="Concentración (ppm)", 
-                        color="Metal", 
-                        barmode="group",
-                        log_y=log_y,
-                        title="Concentración Real de Metales en Muestra Sólida (mg/kg)",
-                        labels={col_muestra_nombre: "Muestra"}
-                    )
-                else:
-                    fig = px.line(
-                        df_melted, 
-                        x=col_muestra_nombre, 
-                        y="Concentración (ppm)", 
-                        color="Metal",
-                        markers=True,
-                        log_y=log_y,
-                        title="Perfil de Concentración de Metales por Muestra",
-                        labels={col_muestra_nombre: "Muestra"}
-                    )
-
-                fig.update_layout(height=550, hovermode="x unified")
-                st.plotly_chart(fig, use_container_width=True)
-
-                # -----------------------------------------------------------------
-                # ESTADÍSTICAS Y ALERTAS DE UMBRAL
-                # -----------------------------------------------------------------
-                col_stat, col_alert = st.columns([1, 1])
-
-                with col_stat:
-                    st.subheader("📈 Resumen Estadístico (ppm)")
-                    df_stats = df_ppm[metales_seleccionados].describe().T[['mean', 'std', 'min', '50%', 'max']]
-                    df_stats.columns = ['Media', 'Desv. Est.', 'Mínimo', 'Mediana', 'Máximo']
-                    st.dataframe(df_stats.style.highlight_max(axis=0, color='#ffcccc'), use_container_width=True)
-
-                with col_alert:
-                    st.subheader("⚠️ Verificación de Umbrales")
-                    metal_ref = st.selectbox("Selecciona metal para evaluar límite:", options=metales_seleccionados)
-                    val_defecto = LIMITES_REFERENCIA.get(metal_ref, 10.0)
-                    umbral_max = st.number_input(f"Límite máximo permitido para {metal_ref} (ppm):", value=float(val_defecto))
-
-                    superan_limite = df_ppm[df_ppm[metal_ref] > umbral_max][[col_muestra_nombre, metal_ref]]
-                    
-                    if not superan_limite.empty:
-                        st.warning(f"Se encontraron **{len(superan_limite)}** muestras que superan el límite de {umbral_max} ppm para **{metal_ref}**:")
-                        st.dataframe(superan_limite.style.format({metal_ref: "{:.4f}"}), use_container_width=True)
-                    else:
-                        st.success(f"✅ Ninguna muestra supera el límite de {umbral_max} ppm para **{metal_ref}**.")
-
-                # -----------------------------------------------------------------
-                # EXPORTACIÓN DE RESULTADOS
-                # -----------------------------------------------------------------
-                st.subheader("📥 Exportar Reporte de Resultados")
-                
-                df_pct = df_ppm.copy()
-                for col in metales_seleccionados:
-                    df_pct[f"{col} (%)"] = df_pct[col] / 10000.0
-
-                buffer = io.BytesIO()
-                with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-                    df_ppm.to_excel(writer, sheet_name='Concentraciones_ppm', index=False)
-                    df_pct.to_excel(writer, sheet_name='Concentraciones_Pct', index=False)
-                    df_stats.to_excel(writer, sheet_name='Estadisticas')
-                
-                st.download_button(
-                    label="📄 Descargar Reporte Completo en Excel (.xlsx)",
-                    data=buffer.getvalue(),
-                    file_name="Reporte_ICP_MS_Calculado.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
-
-        else:
-            st.info("Por favor, selecciona al menos una muestra en la barra lateral para continuar.")
-else:
-    st.info("👋 Por favor, sube un archivo Excel o CSV de Agilent 7900 desde la barra lateral izquierda para comenzar.")
+  except Exception as e:
+    st.error(f"❌ Error al procesar el archivo: {e}")
