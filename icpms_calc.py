@@ -1,4 +1,3 @@
-"""
 ==============================================================================
 ICP-MS Data Processing & Streamlit Web App (Agilent 7900)
 Author: Pedro J. (PedroJNS)
@@ -8,7 +7,6 @@ Description: Web application to upload Agilent 7900 MassHunter files,
              real concentrations in solid samples (ppm and %), and 
              interactively visualize analytical results.
 ==============================================================================
-"""
 
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
@@ -55,7 +53,7 @@ def parsear_archivo_agilent(uploaded_file):
     de encabezado ("Sample Name") y estructurando los metales detectados.
     """
     try:
-        if uploaded_file.name.endswith('.csv'):
+        if uploaded_file.name.lower().endswith('.csv'):
             df_raw = pd.read_csv(uploaded_file, header=None)
         else:
             df_raw = pd.read_excel(uploaded_file, header=None)
@@ -83,7 +81,7 @@ def parsear_archivo_agilent(uploaded_file):
             col_sample_idx = 0
             header_row = 0
 
-        # Construir nombres limpios para las columnas (Elemento + Masa si aplica)
+        # Construir nombres limpios para las columnas
         column_titles = []
         if header_row > 0:
             element_row = df_raw.iloc[header_row - 1].fillna("").astype(str)
@@ -125,45 +123,29 @@ if uploaded_file is not None:
         
         # Filtrar nombres de muestra válidos
         muestras_series = df_data[col_muestra_nombre].dropna().astype(str).str.strip()
-        muestras_unicas = [m for m in muestras_series.unique() if m and m.lower() != "nan"]
+        muestras_unicas = [m for m in muestras_series.unique() if m and m.lower() not in ["nan", "none", ""]]
 
         st.sidebar.markdown("---")
         st.sidebar.header("🎯 2. Selección de Muestras")
         
-        # Selección global o individual de muestras
         seleccionar_todas = st.sidebar.checkbox("Seleccionar todas las muestras", value=True)
-        if seleccionar_todas:
-            muestras_seleccionadas = st.sidebar.multiselect(
-                "Muestras a procesar:", 
-                options=muestras_unicas, 
-                default=muestras_unicas
-            )
-        else:
-            muestras_seleccionadas = st.sidebar.multiselect(
-                "Muestras a procesar:", 
-                options=muestras_unicas
-            )
+        muestras_seleccionadas = st.sidebar.multiselect(
+            "Muestras a procesar:", 
+            options=muestras_unicas, 
+            default=muestras_unicas if seleccionar_todas else []
+        )
 
-        # Identificar columnas analíticas (metales) descartando columnas administrativas
+        # Identificar columnas analíticas
         cols_no_metales = [col_muestra_nombre, "Acq. Date-Time", "Type", "Level", "Sample No.", ""]
         posibles_metales = [c for c in df_data.columns if c not in cols_no_metales and not c.startswith("Unnamed")]
 
         st.sidebar.markdown("---")
         st.sidebar.header("🔬 3. Selección de Metales")
         
-        col_b1, col_b2 = st.sidebar.columns(2)
-        if col_b1.button("Todos"):
-            st.session_state['metales_sel'] = posibles_metales
-        if col_b2.button("Limpiar"):
-            st.session_state['metales_sel'] = []
-
-        if 'metales_sel' not in st.session_state:
-            st.session_state['metales_sel'] = posibles_metales
-
         metales_seleccionados = st.sidebar.multiselect(
             "Elementos a desplegar:",
             options=posibles_metales,
-            default=st.session_state['metales_sel']
+            default=posibles_metales
         )
 
         # -----------------------------------------------------------------------------
@@ -173,52 +155,71 @@ if uploaded_file is not None:
         st.caption("Ingresa la masa de muestra sólida (mg) y el volumen de aforo (mL) para calcular las concentraciones reales.")
 
         if muestras_seleccionadas:
-            # Inicializar estado para los valores de digestión (Default: 100 mg, 50 mL)
-            if 'digestion_data' not in st.session_state:
-                st.session_state.digestion_data = {}
+            # Inicializar dataframe de digestión en session_state si no existe
+            if "df_digestion" not in st.session_state:
+                st.session_state.df_digestion = pd.DataFrame({
+                    "Muestra": muestras_unicas,
+                    "Masa_mg": [100.0] * len(muestras_unicas),
+                    "Volumen_mL": [50.0] * len(muestras_unicas)
+                })
 
-            # Formulario dinámico para la carga de datos de digestión
+            # Asegurar que nuevas muestras se agreguen si cambia el archivo
+            missing_samples = set(muestras_unicas) - set(st.session_state.df_digestion["Muestra"])
+            if missing_samples:
+                new_rows = pd.DataFrame({
+                    "Muestra": list(missing_samples),
+                    "Masa_mg": [100.0] * len(missing_samples),
+                    "Volumen_mL": [50.0] * len(missing_samples)
+                })
+                st.session_state.df_digestion = pd.concat([st.session_state.df_digestion, new_rows], ignore_index=True)
+
             with st.expander("📝 Editar Masa (mg) y Volumen (mL) por muestra", expanded=True):
-                # Aplicación rápida masiva de valores por defecto
                 st.markdown("**Configuración rápida global:**")
                 c_m1, c_m2, c_m3 = st.columns([2, 2, 2])
                 m_global = c_m1.number_input("Masa global (mg):", value=100.0, step=5.0)
                 v_global = c_m2.number_input("Volumen global (mL):", value=50.0, step=5.0)
-                if c_m3.button("Aplicar a todas las seleccionadas"):
-                    for m_name in muestras_seleccionadas:
-                        st.session_state.digestion_data[m_name] = (m_global, v_global)
+                
+                if c_m3.button("Aplicar a seleccionadas"):
+                    mask = st.session_state.df_digestion["Muestra"].isin(muestras_seleccionadas)
+                    st.session_state.df_digestion.loc[mask, "Masa_mg"] = m_global
+                    st.session_state.df_digestion.loc[mask, "Volumen_mL"] = v_global
                     st.rerun()
 
                 st.markdown("---")
-                # Edición individual
-                grid_cols = st.columns(3)
-                digestion_input = {}
-                for idx, sample in enumerate(muestras_seleccionadas):
-                    col_curr = grid_cols[idx % 3]
-                    with col_curr:
-                        st.markdown(f"**{sample}**")
-                        def_m, def_v = st.session_state.digestion_data.get(sample, (100.0, 50.0))
-                        m_val = st.number_input(f"Masa (mg)", value=float(def_m), key=f"m_{sample}", step=1.0)
-                        v_val = st.number_input(f"Volumen (mL)", value=float(def_v), key=f"v_{sample}", step=1.0)
-                        digestion_input[sample] = (m_val, v_val)
-                        st.session_state.digestion_data[sample] = (m_val, v_val)
+                
+                # Editor de datos nativo e interactivo en formato tabla (remplaza el grid dinámico propensa a fallos de estado)
+                df_dig_sub = st.session_state.df_digestion[
+                    st.session_state.df_digestion["Muestra"].isin(muestras_seleccionadas)
+                ].copy()
+
+                edited_df = st.data_editor(
+                    df_dig_sub,
+                    column_config={
+                        "Muestra": st.column_config.TextColumn("Muestra", disabled=True),
+                        "Masa_mg": st.column_config.NumberColumn("Masa (mg)", min_value=0.0001, step=1.0, format="%.2f mg"),
+                        "Volumen_mL": st.column_config.NumberColumn("Volumen (mL)", min_value=0.0001, step=1.0, format="%.2f mL"),
+                    },
+                    hide_index=True,
+                    use_container_width=True,
+                    key="digestion_editor"
+                )
+
+                # Actualizar el estado global con los valores editados
+                for idx, row in edited_df.iterrows():
+                    m_idx = st.session_state.df_digestion["Muestra"] == row["Muestra"]
+                    st.session_state.df_digestion.loc[m_idx, "Masa_mg"] = row["Masa_mg"]
+                    st.session_state.df_digestion.loc[m_idx, "Volumen_mL"] = row["Volumen_mL"]
 
             # -----------------------------------------------------------------------------
             # CÁLCULO DE CONCENTRACIONES REALES (PPM Y %)
             # -----------------------------------------------------------------------------
             df_filtered = df_data[df_data[col_muestra_nombre].astype(str).str.strip().isin(muestras_seleccionadas)].copy()
+            
+            # Unir los datos de digestión con los datos leídos
+            df_dig_map = st.session_state.df_digestion.set_index("Muestra")
+            df_filtered["_Masa"] = df_filtered[col_muestra_nombre].astype(str).str.strip().map(df_dig_map["Masa_mg"]).fillna(100.0)
+            df_filtered["_Volumen"] = df_filtered[col_muestra_nombre].astype(str).str.strip().map(df_dig_map["Volumen_mL"]).fillna(50.0)
 
-            masses = []
-            volumes = []
-            for s in df_filtered[col_muestra_nombre].astype(str).str.strip():
-                m, v = st.session_state.digestion_data.get(s, (100.0, 50.0))
-                masses.append(m if m > 0 else 100.0)
-                volumes.append(v if v > 0 else 50.0)
-
-            s_masses = pd.Series(masses, index=df_filtered.index)
-            s_volumes = pd.Series(volumes, index=df_filtered.index)
-
-            # DataFrame para resultados calculados
             df_ppm = pd.DataFrame()
             df_ppm[col_muestra_nombre] = df_filtered[col_muestra_nombre]
 
@@ -229,7 +230,7 @@ if uploaded_file is not None:
                 ).fillna(0.0)
 
                 # Cálculo: ppm (mg/kg) = [ppb (µg/L) * Volumen (mL)] / Masa (mg)
-                conc_ppm = (raw_reading * s_volumes) / s_masses
+                conc_ppm = (raw_reading * df_filtered["_Volumen"]) / df_filtered["_Masa"]
                 df_ppm[col] = conc_ppm
 
             # -----------------------------------------------------------------------------
@@ -241,13 +242,12 @@ if uploaded_file is not None:
                 st.dataframe(df_ppm.style.format({col: "{:.4f}" for col in metales_seleccionados}), use_container_width=True)
 
             if metales_seleccionados:
-                st.subheader("📊 Visualización Gráfica Interactivas")
+                st.subheader("📊 Visualización Gráfica Interactiva")
                 
                 c_opt1, c_opt2 = st.columns(2)
                 tipo_escala = c_opt1.radio("Escala del eje Y:", ["Lineal", "Logarítmica"], horizontal=True)
                 modo_grafico = c_opt2.radio("Tipo de Gráfico:", ["Barras por Muestra", "Perfil de Líneas"], horizontal=True)
 
-                # Melt de datos para Plotly
                 df_melted = df_ppm.melt(
                     id_vars=[col_muestra_nombre], 
                     value_vars=metales_seleccionados,
@@ -313,7 +313,6 @@ if uploaded_file is not None:
                 # -----------------------------------------------------------------
                 st.subheader("📥 Exportar Reporte de Resultados")
                 
-                # Crear copia en porcentaje (%) además de ppm
                 df_pct = df_ppm.copy()
                 for col in metales_seleccionados:
                     df_pct[f"{col} (%)"] = df_pct[col] / 10000.0
@@ -328,7 +327,7 @@ if uploaded_file is not None:
                     label="📄 Descargar Reporte Completo en Excel (.xlsx)",
                     data=buffer.getvalue(),
                     file_name="Reporte_ICP_MS_Calculado.xlsx",
-                    mime="application/vnd.ms-excel"
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
 
         else:
