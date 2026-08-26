@@ -1,20 +1,37 @@
-# ICP-MS Data Processing Tool (Agilent 7900)
+# 🧪 Analizador ICP-MS - Concentración en Muestras Sólidas
 
-Python tool for automated data processing, concentration calculations (converting raw readings from ppb to ppm and %), and analytical data treatment for **Agilent 7900 ICP-MS (MassHunter)** outputs.
+[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://share.streamlit.io/)
+[![Python 3.9+](https://img.shields.io/badge/Python-3.9%2B-blue.svg)](https://www.python.org/)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 
-## 📌 Ownership & Licensing
-* **Author:** Pedro J. (PedroJNS)
-* **License:** GNU General Public License v3.0 (GPL-3.0)
-* **Development:** Personal and independent open-source project.
+Aplicación web desarrollada en **Streamlit** para el procesamiento automatizado y la visualización interactiva de datos de espectrometría de masas con plasma de acoplamiento inductivo (**ICP-MS**), optimizada para exportaciones de **Agilent 7900 MassHunter**.
 
-## 🚀 Key Features
-* Vectorized data processing using `pandas` and `numpy`.
-* Automated conversion from solution concentrations ($\mu\text{g/L}$ or ppb) to solid sample concentrations ($\text{mg/kg}$ or ppm, and $\%$).
-* Flexible CLI workflow for batch sample digestion input (Sample Mass in mg and Dilution Volume in mL).
+---
 
-## 🧮 Applied Formulas
-* **ppm ($\text{mg/kg}$):** `(ICP_Reading_ppb * Dilution_Volume_mL) / Sample_Mass_mg`
-* **Percentage ($\%$):** `ppm / 10000`
+## 🚀 Características Principales
 
-## ⚠️ Disclaimer
-This code is provided "as is", without warranty of any kind. The author assumes no liability for calculation errors resulting from improperly formatted input data or misuse in laboratory analytical procedures.
+* **📥 Carga Multiformato:** Soporte para archivos de datos en `.xlsx`, `.xls` y `.csv`.
+* **🧠 Detección Inteligente:** Identificación automática de muestras, blancos de calibración/reactivos y filtrado automático de patrones e estándares internos (ISTD).
+* **⚖️ Parámetros de Digestión Modificables:** Tabla interactiva para ajustar rápidamente la Masa de muestra ($mg$) y el Volumen de digestión ($mL$).
+* **🔄 Conmutador de Unidades (% wt / ppm):** Botón *toggle* para alternar en tiempo real entre Porcentaje en Peso (`% wt`) y Partes por Millón (`ppm` / `mg/kg`).
+* **🧮 Corrección por Blancos:** Resta automática del promedio de blancos seleccionados antes de calcular las concentraciones sólidas finales.
+* **📈 Visualización Gráfica:** Generación de gráficos de barras interactivos con opción de escala logarítmica y paletas cromáticas dinámicas.
+* **💾 Exportación Directa:** Descarga de tablas de resultados en Excel (`.xlsx`) y gráficos en calidad de publicación (`.png`).
+
+---
+
+## 🛠️ Instalación y Ejecución Local
+
+Si deseas ejecutar la aplicación localmente en tu equipo:
+
+1. **Clonar el repositorio:**
+   ```bash
+   git clone [https://github.com/TU-USUARIO/icpms-data-processing.git](https://github.com/TU-USUARIO/icpms-data-processing.git)
+   cd icpms-data-processing
+Instalar las dependencias:Bashpip install -r requirements.txt
+Lanzar la aplicación:Bashstreamlit run app.py
+📋 Estructura de requirements.txtPara desplegar en Streamlit Community Cloud, asegúrate de tener un archivo requirements.txt en la raíz del repositorio con el siguiente contenido:Plaintextstreamlit
+pandas
+openpyxl
+matplotlib
+🧪 Formulación Matemática UtilizadaCorrección de Blanco:$$\text{ppb}_{\text{corregido}} = \max(0, \text{ppb}_{\text{muestra}} - \overline{\text{ppb}}_{\text{blancos}})$$Cálculo en Partes por Millón (ppm / mg/kg):$$\text{ppm} = \frac{\text{ppb}_{\text{corregido}} \times \text{Volumen (mL)}}{\text{Masa (mg)}}$$Cálculo en Porcentaje en Peso (% wt):$$\% \text{ wt} = \frac{\text{ppm}}{10000} = \frac{\text{ppb}_{\text{corregido}} \times \text{Volumen (mL)}}{\text{Masa (mg)} \times 10000}$$👤 Autor y ContactoDesarrollador: Pedro J. Navarrete SegadoInstitución: Universidad de Jaén (UJA)Email de Contacto: pnsegado@ujaen.es📄 LicenciaEste proyecto está distribuido bajo la licencia GNU General Public License v3.0 (GPL-3.0). Puedes consultar el archivo LICENSE para más información.
