@@ -17,14 +17,3 @@ Aplicación web desarrollada en **Streamlit** para el procesamiento automatizado
 * **🧮 Corrección por Blancos:** Resta automática del promedio de blancos seleccionados antes de calcular las concentraciones sólidas finales.
 * **📈 Visualización Gráfica:** Generación de gráficos de barras interactivos con opción de escala logarítmica y paletas cromáticas dinámicas.
 * **💾 Exportación Directa:** Descarga de tablas de resultados en Excel (`.xlsx`) y gráficos en calidad de publicación (`.png`).
-
----
-
-## 🛠️ Instalación y Ejecución Local
-
-Sigue estos pasos para instalar y ejecutar la aplicación en tu propio equipo:
-
-### 1. Clonar o descargar el repositorio
-```bash
-git clone [https://github.com/TU-USUARIO/icpms-data-processing.git](https://github.com/TU-USUARIO/icpms-data-processing.git)
-cd icpms-data-processing
