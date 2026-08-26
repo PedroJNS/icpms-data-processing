@@ -1,3 +1,4 @@
+"""
 ==============================================================================
 ICP-MS Data Processing & Streamlit Web App (Agilent 7900)
 Author: Pedro J. (PedroJNS)
@@ -7,6 +8,7 @@ Description: Web application to upload Agilent 7900 MassHunter files,
              real concentrations in solid samples (ppm and %), and 
              interactively visualize analytical results.
 ==============================================================================
+"""
 
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
@@ -187,7 +189,7 @@ if uploaded_file is not None:
 
                 st.markdown("---")
                 
-                # Editor de datos nativo e interactivo en formato tabla (remplaza el grid dinámico propensa a fallos de estado)
+                # Editor de datos nativo e interactivo en formato tabla
                 df_dig_sub = st.session_state.df_digestion[
                     st.session_state.df_digestion["Muestra"].isin(muestras_seleccionadas)
                 ].copy()
