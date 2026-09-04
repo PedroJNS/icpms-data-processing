@@ -17,3 +17,17 @@ Aplicación web desarrollada en **Streamlit** para el procesamiento automatizado
 * **🧮 Corrección por Blancos:** Resta automática del promedio de blancos seleccionados antes de calcular las concentraciones sólidas finales.
 * **📈 Visualización Gráfica:** Generación de gráficos de barras interactivos con opción de escala logarítmica y paletas cromáticas dinámicas.
 * **💾 Exportación Directa:** Descarga de tablas de resultados en Excel (`.xlsx`) y gráficos en calidad de publicación (`.png`).
+
+---
+
+## 📜 Autoría y Licencia
+
+Este proyecto ha sido desarrollado y es propiedad intelectual de **Pedro J. Navarrete Segado**.
+
+Esta aplicación es software libre y se distribuye bajo los términos de la **Licencia Publica General GNU v3.0 (GPL-3.0)**. 
+
+* Puedes usar, copiar, modificar y redistribuir este código libremente.
+* Cualquier trabajo derivado o copia debe mantener esta misma licencia pública (GPLv3) y reconocer explícitamente la autoría original.
+* Consulta el archivo [`LICENSE`](./LICENSE) para obtener más detalles.
+
+---
