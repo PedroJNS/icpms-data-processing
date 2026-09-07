@@ -1,3 +1,4 @@
+"""
 ===============================================================================
 Aplicación: Analizador ICP-MS - Concentración (% wt / ppm) (Versión Streamlit)
 Desarrollador: Pedro J. Navarrete Segado
@@ -236,7 +237,7 @@ def calcular_resultados(
     blancos_seleccionados,
     df_params,
 ):
-    """Calcula los promedios de los blancos y las concentraciones reales en base (% wt y ppm)."""
+    """Calcula los promedios de los blancos y las concentraciones reales (% wt y ppm)."""
     # 1. Calcular promedio de blancos en ppb
     promedio_blancos_ppb = {}
     if blancos_seleccionados:
@@ -361,7 +362,7 @@ st.caption(
     "Desarrollado por Pedro J. Navarrete Segado | Universidad de Jaén (UJA)"
 )
 
-# Pestanas principales: Análisis Actual vs Histórico de Análisis
+# Pestañas principales: Análisis Actual vs Histórico de Análisis
 tab_analisis, tab_historico = st.tabs(["🔬 Nuevo Análisis", "📂 Base de Datos / Histórico"])
 
 # ==========================================
