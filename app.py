@@ -33,17 +33,19 @@ try:
 except AttributeError:
     pass
 
-# --- GESTIÓN DE SEGURIDAD Y BASE DE DATOS (SQLite) ---
-DB_NAME = "icpms_database.db"
+# --- GESTIÓN DE SEGURIDAD Y BASE DE DATOS (SQLite Ruta Absoluta) ---
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.path.join(BASE_DIR, "icpms_database.db")
 
 def hash_password(password: str) -> str:
     """Devuelve el hash SHA-256 de una contraseña."""
     return hashlib.sha256(password.encode("utf-8")).hexdigest()
 
 def init_db():
-    """Inicializa y migra la base de datos SQLite si es necesario."""
-    conn = sqlite3.connect(DB_NAME)
+    """Inicializa y migra la base de datos SQLite con ruta absoluta."""
+    conn = sqlite3.connect(DB_PATH, timeout=15)
     c = conn.cursor()
+    c.execute("PRAGMA journal_mode=WAL;")
     c.execute("""
         CREATE TABLE IF NOT EXISTS usuarios (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -52,7 +54,6 @@ def init_db():
         )
     """)
     
-    # Comprobar migración para bases de datos existentes sin la columna clave_hash
     c.execute("PRAGMA table_info(usuarios)")
     columns = [row[1] for row in c.fetchall()]
     if "clave_hash" not in columns:
@@ -79,7 +80,7 @@ def registrar_usuario(nombre, clave):
     if not nombre_clean or not clave_clean:
         return False, "El usuario y la contraseña no pueden estar vacíos."
     
-    conn = sqlite3.connect(DB_NAME)
+    conn = sqlite3.connect(DB_PATH, timeout=15)
     c = conn.cursor()
     try:
         c.execute(
@@ -90,14 +91,15 @@ def registrar_usuario(nombre, clave):
         exito, msg = True, f"Usuario '{nombre_clean}' registrado con éxito."
     except sqlite3.IntegrityError:
         exito, msg = False, "El nombre de usuario ya está registrado."
-    conn.close()
+    finally:
+        conn.close()
     return exito, msg
 
 def verificar_usuario(nombre, clave):
-    """Verifica si las credenciales ingresadas son correctas."""
-    conn = sqlite3.connect(DB_NAME)
+    """Verifica credenciales sin distinción estricta de mayúsculas/minúsculas."""
+    conn = sqlite3.connect(DB_PATH, timeout=15)
     c = conn.cursor()
-    c.execute("SELECT clave_hash FROM usuarios WHERE nombre = ?", (nombre.strip(),))
+    c.execute("SELECT clave_hash FROM usuarios WHERE LOWER(nombre) = LOWER(?)", (nombre.strip(),))
     row = c.fetchone()
     conn.close()
     if row and row[0] == hash_password(clave.strip()):
@@ -105,10 +107,10 @@ def verificar_usuario(nombre, clave):
     return False
 
 def guardar_analisis_db(usuario_nombre, nombre_analisis, df_results):
-    """Guarda un análisis asociado estrictamente al usuario autenticado."""
-    conn = sqlite3.connect(DB_NAME)
+    """Guarda un análisis asociado al usuario de forma permanente."""
+    conn = sqlite3.connect(DB_PATH, timeout=15)
     c = conn.cursor()
-    c.execute("SELECT id FROM usuarios WHERE nombre = ?", (usuario_nombre,))
+    c.execute("SELECT id FROM usuarios WHERE LOWER(nombre) = LOWER(?)", (usuario_nombre.strip(),))
     user_row = c.fetchone()
     if not user_row:
         conn.close()
@@ -120,36 +122,36 @@ def guardar_analisis_db(usuario_nombre, nombre_analisis, df_results):
     c.execute("""
         INSERT INTO analisis (usuario_id, nombre_analisis, df_json)
         VALUES (?, ?, ?)
-    """, (user_id, nombre_analisis, df_json))
+    """, (user_id, nombre_analisis.strip(), df_json))
     conn.commit()
     conn.close()
     return True
 
 def obtener_analisis_usuario(usuario_nombre):
-    """Devuelve únicamente la lista de análisis del usuario autenticado."""
-    conn = sqlite3.connect(DB_NAME)
+    """Devuelve los análisis guardados filtrados por usuario."""
+    conn = sqlite3.connect(DB_PATH, timeout=15)
     c = conn.cursor()
     c.execute("""
         SELECT a.id, a.nombre_analisis, a.fecha 
         FROM analisis a
         JOIN usuarios u ON a.usuario_id = u.id
-        WHERE u.nombre = ?
+        WHERE LOWER(u.nombre) = LOWER(?)
         ORDER BY a.fecha DESC
-    """, (usuario_nombre,))
+    """, (usuario_nombre.strip(),))
     analisis_list = c.fetchall()
     conn.close()
     return analisis_list
 
 def cargar_analisis_db(analisis_id, usuario_nombre):
-    """Carga un análisis asegurando que pertenece al usuario activo."""
-    conn = sqlite3.connect(DB_NAME)
+    """Carga los datos de un análisis específico."""
+    conn = sqlite3.connect(DB_PATH, timeout=15)
     c = conn.cursor()
     c.execute("""
         SELECT a.df_json 
         FROM analisis a
         JOIN usuarios u ON a.usuario_id = u.id
-        WHERE a.id = ? AND u.nombre = ?
-    """, (analisis_id, usuario_nombre))
+        WHERE a.id = ? AND LOWER(u.nombre) = LOWER(?)
+    """, (analisis_id, usuario_nombre.strip()))
     row = c.fetchone()
     conn.close()
     if row:
@@ -161,7 +163,6 @@ init_db()
 
 # --- FUNCIONES DE PROCESAMIENTO DE DATOS ---
 def procesar_archivo_raw(uploaded_file):
-    """Lee el archivo cargado y localiza los encabezados y columnas clave."""
     if uploaded_file.name.lower().endswith(".csv"):
         df_raw = pd.read_csv(uploaded_file, header=None)
     else:
@@ -221,7 +222,6 @@ def procesar_archivo_raw(uploaded_file):
     )
 
 def preparar_mapeo_columnas(df_raw, fila_encabezado, col_sample_idx):
-    """Mapea las columnas de elementos evitando los ISTD."""
     element_map = {}
     curr_elem = ""
     for c_idx in range(df_raw.shape[1]):
@@ -262,7 +262,6 @@ def calcular_resultados(
     blancos_seleccionados,
     df_params,
 ):
-    """Calcula los promedios de blancos y las concentraciones (% wt y ppm)."""
     promedio_blancos_ppb = {}
     if blancos_seleccionados:
         col_serie = df_data.iloc[:, col_sample_idx].astype(str).str.strip()
@@ -336,18 +335,14 @@ def calcular_resultados(
     return pd.DataFrame(filas_export)
 
 def generar_excel_proyecto(df_results_base, df_results_display):
-    """Genera un archivo Excel con hoja de resultados y hoja oculta de metadatos para recarga futura."""
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         df_results_display.to_excel(writer, index=False, sheet_name="Resultados_ICPMS")
-        
-        # Guardar DataFrame base (% wt) en formato JSON en una segunda pestaña
         df_meta = pd.DataFrame({"json_data": [df_results_base.to_json(orient="split")]})
         df_meta.to_excel(writer, index=False, sheet_name="_ICPMS_Metadata")
     return output.getvalue()
 
 def cargar_desde_excel_proyecto(uploaded_excel):
-    """Carga un archivo Excel exportado previamente por la aplicación."""
     try:
         excel_obj = pd.ExcelFile(uploaded_excel)
         if "_ICPMS_Metadata" in excel_obj.sheet_names:
@@ -355,14 +350,13 @@ def cargar_desde_excel_proyecto(uploaded_excel):
             json_str = df_meta["json_data"].iloc[0]
             return pd.read_json(io.StringIO(json_str), orient="split")
         else:
-            # Intentar leer tabla directa
             df_direct = pd.read_excel(excel_obj, sheet_name=excel_obj.sheet_names[0])
             return df_direct
     except Exception as e:
         st.error(f"Error al leer el archivo de proyecto Excel: {e}")
         return None
 
-# --- GESTIÓN DE SESIÓN EN STREAMLIT ---
+# --- GESTIÓN DE SESIÓN ---
 if "usuario_logueado" not in st.session_state:
     st.session_state["usuario_logueado"] = None
 
@@ -378,7 +372,7 @@ with st.sidebar:
         if st.button("Ingresar", type="primary"):
             if verificar_usuario(user_input, pass_input):
                 st.session_state["usuario_logueado"] = user_input.strip()
-                st.success(f"¡Bienvenido, {user_input}!")
+                st.success(f"¡Bienvenido, {user_input.strip()}!")
                 st.rerun()
             else:
                 st.error("Credenciales incorrectas. Inténtalo de nuevo.")
@@ -423,7 +417,6 @@ with st.sidebar:
 st.title("🧪 Analizador ICP-MS - Concentración (% wt / ppm)")
 st.caption("Desarrollado por Pedro J. Navarrete Segado | Universidad de Jaén (UJA)")
 
-# Pestañas principales
 tab_analisis, tab_historico, tab_cargar_excel = st.tabs([
     "🔬 Nuevo Análisis", 
     "📂 Base de Datos (Privada)", 
@@ -603,13 +596,12 @@ with tab_analisis:
                         st.write(" ")
                         if st.button("💾 Guardar en mi Cuenta", type="secondary"):
                             if guardar_analisis_db(usuario_activo, nombre_analisis_input, df_results_base):
-                                st.success("¡Análisis guardado correctamente en tu espacio privado!")
+                                st.success(f"¡Análisis '{nombre_analisis_input}' guardado correctamente!")
                             else:
-                                st.error("No se pudo guardar el análisis.")
+                                st.error("No se pudo guardar el análisis. Verifica tu usuario.")
                 else:
                     st.info("ℹ️ Para guardar análisis en la base de datos, por favor **inicia sesión** en la barra lateral.")
 
-                # Botón de exportación a Excel
                 excel_proyecto_bytes = generar_excel_proyecto(df_results_base, df_results_display)
 
                 st.download_button(
@@ -740,7 +732,7 @@ with tab_historico:
             df_cargado_base = cargar_analisis_db(analisis_id, usuario_activo)
             
             if df_cargado_base is not None:
-                st.success("Análisis cargado correctamente.")
+                st.success("Análisis cargado correctamente desde la base de datos.")
                 
                 unidad_medida_hist = st.radio(
                     "🔄 Unidad de visualización para el análisis histórico:",
