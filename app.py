@@ -763,7 +763,100 @@ with tab_historico:
                     data=excel_bytes_h,
                     file_name=f"Resultados_Guardados_{usuario_activo}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="btn_export_hist",
                 )
+
+                # --- SECCIÓN GRÁFICA EN BASE DE DATOS ---
+                st.divider()
+                st.subheader(f"📈 Gráfico de Concentraciones por Metal {suff_hist}")
+
+                cols_metales_hist = [c for c in df_hist_display.columns if suff_hist in c]
+
+                if cols_metales_hist:
+                    col_gh1, col_gh2 = st.columns([1, 3])
+
+                    with col_gh1:
+                        usar_log_hist = st.checkbox(
+                            "Usar escala logarítmica",
+                            value=False,
+                            key="usar_log_hist",
+                            help="Útil si hay diferencias de varios órdenes de magnitud entre metales.",
+                        )
+
+                        nombres_metales_hist = [c.replace(f" {suff_hist}", "") for c in cols_metales_hist]
+                        metales_sel_hist = st.multiselect(
+                            "Selecciona metales para graficar:",
+                            options=nombres_metales_hist,
+                            default=nombres_metales_hist[: min(5, len(nombres_metales_hist))],
+                            key="metales_sel_hist",
+                        )
+
+                    with col_gh2:
+                        if metales_sel_hist:
+                            cols_graficar_hist = [f"{m} {suff_hist}" for m in metales_sel_hist]
+                            df_plot_hist = df_hist_display.set_index("Sample Name")[cols_graficar_hist]
+                            df_plot_hist.columns = [
+                                c.replace(f" {suff_hist}", "") for c in df_plot_hist.columns
+                            ]
+
+                            fig_h, ax_h = plt.subplots(figsize=(10, 5), dpi=100)
+
+                            num_metales_h = len(metales_sel_hist)
+                            cmap_dinamico_h = matplotlib.colormaps["turbo"].resampled(num_metales_h)
+
+                            df_plot_hist.plot(
+                                kind="bar",
+                                ax=ax_h,
+                                width=0.7,
+                                edgecolor="black",
+                                linewidth=0.5,
+                                colormap=cmap_dinamico_h,
+                            )
+
+                            label_y_h = f"Concentración {suff_hist}" + (" - Escala Log" if usar_log_hist else "")
+                            if usar_log_hist:
+                                ax_h.set_yscale("log")
+
+                            ax_h.set_ylabel(label_y_h, fontsize=10, fontweight="bold")
+
+                            ncols_h = 1 if num_metales_h <= 10 else (2 if num_metales_h <= 20 else 3)
+                            ax_h.legend(
+                                title="Elementos",
+                                bbox_to_anchor=(1.02, 1),
+                                loc="upper left",
+                                frameon=True,
+                                ncol=ncols_h,
+                                fontsize=8,
+                                title_fontsize=9,
+                            )
+
+                            ax_h.set_title(
+                                f"Concentración Elemental en Muestras {suff_hist}",
+                                fontsize=12,
+                                fontweight="bold",
+                                pad=12,
+                            )
+                            ax_h.set_xlabel("Muestra", fontsize=10, fontweight="bold")
+                            ax_h.grid(axis="y", linestyle="--", alpha=0.6)
+                            plt.xticks(rotation=45, ha="right")
+                            fig_h.tight_layout()
+
+                            st.pyplot(fig_h)
+
+                            img_buf_h = io.BytesIO()
+                            fig_h.savefig(img_buf_h, format="png", dpi=300, bbox_inches="tight")
+                            img_buf_h.seek(0)
+
+                            st.download_button(
+                                label="💾 Descargar Gráfico como PNG",
+                                data=img_buf_h,
+                                file_name=f"grafico_concentraciones_guardado.png",
+                                mime="image/png",
+                                key="download_plot_hist",
+                            )
+                            plt.close(fig_h)
+                        else:
+                            st.info("Selecciona al menos un metal para visualizar el gráfico.")
 
 
 # ==========================================
