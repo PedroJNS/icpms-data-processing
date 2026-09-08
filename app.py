@@ -4,6 +4,7 @@ Aplicación: Analizador ICP-MS - Concentración (% wt / ppm) (Versión Streamlit
 Desarrollador: Pedro J. Navarrete Segado
 Institución: Universidad de Jaén (UJA)
 Contacto: pnsegado@ujaen.es
+Repositorio: https://github.com/PedroJNS/icpms-data-processing
 Licencia: GNU General Public License v3.0 (GPL-3.0)
 ===============================================================================
 """
@@ -104,7 +105,7 @@ def verificar_usuario(nombre, clave):
     return False
 
 def guardar_analisis_db(usuario_nombre, nombre_analisis, df_results):
-    """Guarda un análisis asociado strictly al usuario autenticado."""
+    """Guarda un análisis asociado estrictamente al usuario autenticado."""
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     c.execute("SELECT id FROM usuarios WHERE nombre = ?", (usuario_nombre,))
@@ -406,6 +407,7 @@ with st.sidebar:
         * **Desarrollador:** Pedro J. Navarrete Segado  
         * **Institución:** Universidad de Jaén (UJA)  
         * **Contacto:** [pnsegado@ujaen.es](mailto:pnsegado@ujaen.es)  
+        * **Repositorio:** [GitHub](https://github.com/PedroJNS/icpms-data-processing)  
         * **Licencia:** GNU General Public License v3.0 (GPL-3.0)  
         
         *Copyright (c) Pedro J. Navarrete Segado*
