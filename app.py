@@ -1,4 +1,3 @@
-"""
 ===============================================================================
 Aplicación: Analizador ICP-MS - Concentración (% wt / ppm) (Versión Streamlit)
 Desarrollador: Pedro J. Navarrete Segado
@@ -12,6 +11,7 @@ import io
 import os
 import sqlite3
 import warnings
+import hashlib
 import matplotlib.pyplot as plt
 import matplotlib
 import pandas as pd
@@ -31,19 +31,31 @@ try:
 except AttributeError:
     pass
 
-# --- GESTIÓN DE BASE DE DATOS (SQLite) ---
+# --- GESTIÓN DE SEGURIDAD Y BASE DE DATOS (SQLite) ---
 DB_NAME = "icpms_database.db"
 
+def hash_password(password: str) -> str:
+    """Devuelve el hash SHA-256 de una contraseña."""
+    return hashlib.sha256(password.encode("utf-8")).hexdigest()
+
 def init_db():
-    """Inicializa las tablas de la base de datos si no existen."""
+    """Inicializa y migra la base de datos SQLite si es necesario."""
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     c.execute("""
         CREATE TABLE IF NOT EXISTS usuarios (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            nombre TEXT UNIQUE NOT NULL
+            nombre TEXT UNIQUE NOT NULL,
+            clave_hash TEXT NOT NULL
         )
     """)
+    
+    # Comprobar migración para bases de datos existentes sin la columna clave_hash
+    c.execute("PRAGMA table_info(usuarios)")
+    columns = [row[1] for row in c.fetchall()]
+    if "clave_hash" not in columns:
+        c.execute("ALTER TABLE usuarios ADD COLUMN clave_hash TEXT DEFAULT ''")
+    
     c.execute("""
         CREATE TABLE IF NOT EXISTS analisis (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -57,32 +69,41 @@ def init_db():
     conn.commit()
     conn.close()
 
-def obtener_usuarios():
-    """Devuelve la lista de usuarios registrados."""
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("SELECT nombre FROM usuarios ORDER BY nombre ASC")
-    users = [row[0] for row in c.fetchall()]
-    conn.close()
-    return users
-
-def crear_usuario(nombre):
-    """Crea un nuevo usuario en la base de datos."""
-    if not nombre.strip():
-        return False
+def registrar_usuario(nombre, clave):
+    """Registra un nuevo usuario con su contraseña cifrada."""
+    nombre_clean = nombre.strip()
+    clave_clean = clave.strip()
+    
+    if not nombre_clean or not clave_clean:
+        return False, "El usuario y la contraseña no pueden estar vacíos."
+    
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     try:
-        c.execute("INSERT INTO usuarios (nombre) VALUES (?)", (nombre.strip(),))
+        c.execute(
+            "INSERT INTO usuarios (nombre, clave_hash) VALUES (?, ?)",
+            (nombre_clean, hash_password(clave_clean)),
+        )
         conn.commit()
-        exito = True
+        exito, msg = True, f"Usuario '{nombre_clean}' registrado con éxito."
     except sqlite3.IntegrityError:
-        exito = False
+        exito, msg = False, "El nombre de usuario ya está registrado."
     conn.close()
-    return exito
+    return exito, msg
+
+def verificar_usuario(nombre, clave):
+    """Verifica si las credenciales ingresadas son correctas."""
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("SELECT clave_hash FROM usuarios WHERE nombre = ?", (nombre.strip(),))
+    row = c.fetchone()
+    conn.close()
+    if row and row[0] == hash_password(clave.strip()):
+        return True
+    return False
 
 def guardar_analisis_db(usuario_nombre, nombre_analisis, df_results):
-    """Guarda un análisis en formato JSON asociado al usuario."""
+    """Guarda un análisis asociado estrictamente al usuario autenticado."""
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     c.execute("SELECT id FROM usuarios WHERE nombre = ?", (usuario_nombre,))
@@ -103,7 +124,7 @@ def guardar_analisis_db(usuario_nombre, nombre_analisis, df_results):
     return True
 
 def obtener_analisis_usuario(usuario_nombre):
-    """Devuelve la lista de análisis guardados de un usuario."""
+    """Devuelve únicamente la lista de análisis del usuario autenticado."""
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     c.execute("""
@@ -117,22 +138,26 @@ def obtener_analisis_usuario(usuario_nombre):
     conn.close()
     return analisis_list
 
-def cargar_analisis_db(analisis_id):
-    """Carga el DataFrame guardado correspondiente a un ID de análisis."""
+def cargar_analisis_db(analisis_id, usuario_nombre):
+    """Carga un análisis asegurando que pertenece al usuario activo."""
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
-    c.execute("SELECT df_json FROM analisis WHERE id = ?", (analisis_id,))
+    c.execute("""
+        SELECT a.df_json 
+        FROM analisis a
+        JOIN usuarios u ON a.usuario_id = u.id
+        WHERE a.id = ? AND u.nombre = ?
+    """, (analisis_id, usuario_nombre))
     row = c.fetchone()
     conn.close()
     if row:
         return pd.read_json(io.StringIO(row[0]), orient="split")
     return None
 
-# Inicializar DB
+# Inicializar Base de Datos
 init_db()
 
-
-# --- FUNCIONES DE PROCESAMIENTO ---
+# --- FUNCIONES DE PROCESAMIENTO DE DATOS ---
 def procesar_archivo_raw(uploaded_file):
     """Lee el archivo cargado y localiza los encabezados y columnas clave."""
     if uploaded_file.name.lower().endswith(".csv"):
@@ -193,7 +218,6 @@ def procesar_archivo_raw(uploaded_file):
         col_date_idx,
     )
 
-
 def preparar_mapeo_columnas(df_raw, fila_encabezado, col_sample_idx):
     """Mapea las columnas de elementos evitando los ISTD."""
     element_map = {}
@@ -228,7 +252,6 @@ def preparar_mapeo_columnas(df_raw, fila_encabezado, col_sample_idx):
 
     return cols_interes
 
-
 def calcular_resultados(
     df_data,
     cols_interes,
@@ -237,8 +260,7 @@ def calcular_resultados(
     blancos_seleccionados,
     df_params,
 ):
-    """Calcula los promedios de los blancos y las concentraciones reales (% wt y ppm)."""
-    # 1. Calcular promedio de blancos en ppb
+    """Calcula los promedios de blancos y las concentraciones (% wt y ppm)."""
     promedio_blancos_ppb = {}
     if blancos_seleccionados:
         col_serie = df_data.iloc[:, col_sample_idx].astype(str).str.strip()
@@ -265,7 +287,6 @@ def calcular_resultados(
                 if valores_ppb:
                     promedio_blancos_ppb[c_idx] = sum(valores_ppb) / len(valores_ppb)
 
-    # 2. Recalcular concentraciones (% wt)
     col_serie = df_data.iloc[:, col_sample_idx].astype(str).str.strip()
     df_filt = df_data[col_serie.isin(muestras_elegidas)].copy()
 
@@ -306,37 +327,76 @@ def calcular_resultados(
                 except ValueError:
                     pct = 0.0
 
-                # Guardamos internamente en % wt
                 row_dict[f"{nombre_elem} (% wt)"] = pct
 
         filas_export.append(row_dict)
 
     return pd.DataFrame(filas_export)
 
+def generar_excel_proyecto(df_results_base, df_results_display):
+    """Genera un archivo Excel con hoja de resultados y hoja oculta de metadatos para recarga futura."""
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df_results_display.to_excel(writer, index=False, sheet_name="Resultados_ICPMS")
+        
+        # Guardar DataFrame base (% wt) en formato JSON en una segunda pestaña
+        df_meta = pd.DataFrame({"json_data": [df_results_base.to_json(orient="split")]})
+        df_meta.to_excel(writer, index=False, sheet_name="_ICPMS_Metadata")
+    return output.getvalue()
 
-# --- INTERFAZ STREAMLIT ---
+def cargar_desde_excel_proyecto(uploaded_excel):
+    """Carga un archivo Excel exportado previamente por la aplicación."""
+    try:
+        excel_obj = pd.ExcelFile(uploaded_excel)
+        if "_ICPMS_Metadata" in excel_obj.sheet_names:
+            df_meta = pd.read_excel(excel_obj, sheet_name="_ICPMS_Metadata")
+            json_str = df_meta["json_data"].iloc[0]
+            return pd.read_json(io.StringIO(json_str), orient="split")
+        else:
+            # Intentar leer tabla directa
+            df_direct = pd.read_excel(excel_obj, sheet_name=excel_obj.sheet_names[0])
+            return df_direct
+    except Exception as e:
+        st.error(f"Error al leer el archivo de proyecto Excel: {e}")
+        return None
 
-# Créditos y Gestión de Usuarios en Barra Lateral (Sidebar)
+# --- GESTIÓN DE SESIÓN EN STREAMLIT ---
+if "usuario_logueado" not in st.session_state:
+    st.session_state["usuario_logueado"] = None
+
+# --- BARRA LATERAL (SIDEBAR) ---
 with st.sidebar:
-    st.header("👤 Usuario / Base de Datos")
+    st.header("👤 Control de Acceso")
     
-    lista_usuarios = obtener_usuarios()
-    if not lista_usuarios:
-        st.info("No hay usuarios registrados. Crea uno para comenzar a guardar análisis.")
-    
-    usuario_seleccionado = st.selectbox(
-        "Seleccionar Usuario:",
-        options=["-- Seleccionar --"] + lista_usuarios,
-    )
-    
-    with st.expander("➕ Crear Nuevo Usuario"):
-        nuevo_usuario_input = st.text_input("Nombre de usuario:")
-        if st.button("Registrar Usuario"):
-            if crear_usuario(nuevo_usuario_input):
-                st.success(f"Usuario '{nuevo_usuario_input}' registrado.")
+    if st.session_state["usuario_logueado"] is None:
+        st.subheader("🔑 Iniciar Sesión")
+        user_input = st.text_input("Usuario:", key="login_user")
+        pass_input = st.text_input("Contraseña:", type="password", key="login_pass")
+        
+        if st.button("Ingresar", type="primary"):
+            if verificar_usuario(user_input, pass_input):
+                st.session_state["usuario_logueado"] = user_input.strip()
+                st.success(f"¡Bienvenido, {user_input}!")
                 st.rerun()
             else:
-                st.error("El usuario ya existe o el nombre no es válido.")
+                st.error("Credenciales incorrectas. Inténtalo de nuevo.")
+                
+        st.divider()
+        with st.expander("➕ Registrar Nuevo Usuario"):
+            reg_user = st.text_input("Nuevo Usuario:", key="reg_user")
+            reg_pass = st.text_input("Nueva Contraseña:", type="password", key="reg_pass")
+            if st.button("Registrar Cuenta"):
+                exito, msg = registrar_usuario(reg_user, reg_pass)
+                if exito:
+                    st.success(msg)
+                else:
+                    st.error(msg)
+    else:
+        usuario_actual = st.session_state["usuario_logueado"]
+        st.success(f"🟢 **Sesión Activa:**\n{usuario_actual}")
+        if st.button("🚪 Cerrar Sesión"):
+            st.session_state["usuario_logueado"] = None
+            st.rerun()
 
     st.divider()
     st.header("ℹ️ Acerca de")
@@ -353,23 +413,24 @@ with st.sidebar:
     st.caption(
         "Web application to upload Agilent 7900 MassHunter files, input sample"
         " digestion data (mass & volume), calculate real concentrations in solid"
-        " samples (ppm and %), store user history, and interactively visualize results."
+        " samples (ppm and %), store user history safely, and interactively visualize results."
     )
 
-# Encabezado Principal
+# --- VISTA PRINCIPAL ---
 st.title("🧪 Analizador ICP-MS - Concentración (% wt / ppm)")
-st.caption(
-    "Desarrollado por Pedro J. Navarrete Segado | Universidad de Jaén (UJA)"
-)
+st.caption("Desarrollado por Pedro J. Navarrete Segado | Universidad de Jaén (UJA)")
 
-# Pestañas principales: Análisis Actual vs Histórico de Análisis
-tab_analisis, tab_historico = st.tabs(["🔬 Nuevo Análisis", "📂 Base de Datos / Histórico"])
+# Pestañas principales
+tab_analisis, tab_historico, tab_cargar_excel = st.tabs([
+    "🔬 Nuevo Análisis", 
+    "📂 Base de Datos (Privada)", 
+    "📥 Cargar Proyecto Excel"
+])
 
 # ==========================================
 # PESTAÑA 1: NUEVO ANÁLISIS
 # ==========================================
 with tab_analisis:
-    # Conmutador de Unidad de Medida
     unidad_medida = st.radio(
         "🔄 Unidad de visualización de resultados:",
         options=["% wt (Porcentaje en Peso)", "ppm (Partes por Millón)"],
@@ -377,9 +438,8 @@ with tab_analisis:
     )
     es_ppm = "ppm" in unidad_medida
 
-    # 1. Cargar Documento
     uploaded_file = st.file_uploader(
-        "1. Cargar Documento (Excel / CSV)", type=["xlsx", "xls", "csv"]
+        "1. Cargar Documento ICP-MS (Excel / CSV de Agilent)", type=["xlsx", "xls", "csv"]
     )
 
     if uploaded_file is not None:
@@ -396,7 +456,6 @@ with tab_analisis:
                 df_raw, fila_encabezado, col_sample_idx
             )
 
-            # Identificar Muestras y Blancos sugeridos
             palabras_ignorar = [
                 "blank", "blanco", "ppb", "calblk", "calstd", "blkvrfy",
                 "qc", "driftchk", "cicspike", "isostd", "dilstd", "bkgnd", "fqblk",
@@ -429,13 +488,11 @@ with tab_analisis:
                     elif not any(p in m_lower for p in palabras_ignorar):
                         muestras_validas.append(m_clean)
 
-            # Quitar duplicados manteniendo orden
             muestras_validas = list(dict.fromkeys(muestras_validas))
             blancos_detectados = list(dict.fromkeys(blancos_detectados))
 
             st.divider()
 
-            # 2 y 3. Selección de Muestras y Blancos
             col_sel1, col_sel2 = st.columns(2)
 
             with col_sel1:
@@ -458,11 +515,9 @@ with tab_analisis:
                 st.divider()
                 st.subheader("4. Parámetros de Digestión (Masa y Volumen)")
                 st.info(
-                    "💡 **Pista:** Puedes editar los valores de Masa y Volumen directamente"
-                    " en la tabla a continuación:"
+                    "💡 **Pista:** Puedes editar los valores de Masa (mg) y Volumen (mL) directamente en la tabla:"
                 )
 
-                # DataFrame editable para Masa y Volumen
                 df_params_init = pd.DataFrame({
                     "Sample Name": muestras_elegidas,
                     "Masa (mg)": [15.0] * len(muestras_elegidas),
@@ -483,7 +538,6 @@ with tab_analisis:
                     },
                 )
 
-                # Calcular Resultados Base (en % wt)
                 df_results_base = calcular_resultados(
                     df_data,
                     cols_interes,
@@ -493,7 +547,6 @@ with tab_analisis:
                     df_params_edited,
                 )
 
-                # Adaptar DataFrame a la unidad elegida con el conmutador
                 df_results_display = df_results_base.copy()
                 cols_pct = [c for c in df_results_base.columns if "% wt" in c]
 
@@ -509,7 +562,6 @@ with tab_analisis:
                 st.divider()
                 st.subheader(f"📊 Tabla de Resultados {suff}")
 
-                # Dar formato legible a la vista
                 df_view = df_results_display.copy()
                 cols_val = [c for c in df_view.columns if suff in c]
 
@@ -532,39 +584,35 @@ with tab_analisis:
 
                 st.dataframe(df_view, use_container_width=True)
 
-                # Guardar en Base de Datos
                 st.divider()
-                st.subheader("💾 Guardar Análisis en Base de Datos")
-                col_db1, col_db2 = st.columns([2, 1])
-                with col_db1:
-                    nombre_analisis_input = st.text_input(
-                        "Nombre del Análisis / Proyecto:",
-                        value=f"Análisis {uploaded_file.name}",
-                    )
-                with col_db2:
-                    st.write(" ")
-                    st.write(" ")
-                    if st.button("💾 Guardar Análisis", type="secondary"):
-                        if usuario_seleccionado and usuario_seleccionado != "-- Seleccionar --":
-                            if guardar_analisis_db(usuario_seleccionado, nombre_analisis_input, df_results_base):
-                                st.success("¡Análisis guardado correctamente en la base de datos!")
+                st.subheader("💾 Guardar Análisis en Base de Datos Privada")
+                
+                usuario_activo = st.session_state["usuario_logueado"]
+                if usuario_activo:
+                    col_db1, col_db2 = st.columns([2, 1])
+                    with col_db1:
+                        nombre_analisis_input = st.text_input(
+                            "Nombre del Análisis / Proyecto:",
+                            value=f"Análisis {uploaded_file.name}",
+                        )
+                    with col_db2:
+                        st.write(" ")
+                        st.write(" ")
+                        if st.button("💾 Guardar en mi Cuenta", type="secondary"):
+                            if guardar_analisis_db(usuario_activo, nombre_analisis_input, df_results_base):
+                                st.success("¡Análisis guardado correctamente en tu espacio privado!")
                             else:
                                 st.error("No se pudo guardar el análisis.")
-                        else:
-                            st.warning("⚠️ Selecciona un usuario en la barra lateral antes de guardar.")
+                else:
+                    st.info("ℹ️ Para guardar análisis en la base de datos, por favor **inicia sesión** en la barra lateral.")
 
                 # Botón de exportación a Excel
-                output = io.BytesIO()
-                with pd.ExcelWriter(output, engine="openpyxl") as writer:
-                    df_results_display.to_excel(
-                        writer, index=False, sheet_name="Resultados_ICP-MS"
-                    )
-                excel_bytes = output.getvalue()
+                excel_proyecto_bytes = generar_excel_proyecto(df_results_base, df_results_display)
 
                 st.download_button(
-                    label="📥 Exportar Resultados a Excel",
-                    data=excel_bytes,
-                    file_name=f"Resultados_ICPMS_{'ppm' if es_ppm else 'pct'}.xlsx",
+                    label="📥 Exportar Proyecto a Excel (.xlsx)",
+                    data=excel_proyecto_bytes,
+                    file_name=f"Proyecto_ICPMS_{'ppm' if es_ppm else 'pct'}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     type="primary",
                 )
@@ -644,7 +692,6 @@ with tab_analisis:
 
                             st.pyplot(fig)
 
-                            # Descarga de Imagen PNG
                             img_buf = io.BytesIO()
                             fig.savefig(img_buf, format="png", dpi=300, bbox_inches="tight")
                             img_buf.seek(0)
@@ -657,44 +704,41 @@ with tab_analisis:
                             )
                             plt.close(fig)
                         else:
-                            st.info(
-                                "Selecciona al menos un metal en el panel de la izquierda para"
-                                " visualizar el gráfico."
-                            )
+                            st.info("Selecciona al menos un metal para visualizar el gráfico.")
 
         except Exception as e:
             st.error(f"❌ Error al procesar el archivo: {e}")
 
 
 # ==========================================
-# PESTAÑA 2: HISTÓRICO Y BASE DE DATOS
+# PESTAÑA 2: HISTÓRICO Y BASE DE DATOS PRIVADA
 # ==========================================
 with tab_historico:
     st.subheader("📁 Consulta de Análisis Guardados")
     
-    if not usuario_seleccionado or usuario_seleccionado == "-- Seleccionar --":
-        st.info("👈 Por favor, selecciona un usuario en la barra lateral para ver su historial de análisis.")
+    usuario_activo = st.session_state["usuario_logueado"]
+    if not usuario_activo:
+        st.warning("🔒 Acceso restringido. Por favor, **inicia sesión** en la barra lateral para acceder a tu historial privado.")
     else:
-        analisis_guardados = obtener_analisis_usuario(usuario_seleccionado)
+        analisis_guardados = obtener_analisis_usuario(usuario_activo)
         if not analisis_guardados:
-            st.warning(f"No se encontraron análisis guardados para el usuario '{usuario_seleccionado}'.")
+            st.info(f"No se encontraron análisis guardados en la cuenta de '{usuario_activo}'.")
         else:
             opciones_analisis = {
                 f"{a[1]} (Fecha: {a[2]})": a[0] for a in analisis_guardados
             }
             
             analisis_elegido_str = st.selectbox(
-                "Selecciona un análisis guardado previamente:",
+                "Selecciona un análisis guardado de tu cuenta:",
                 options=list(opciones_analisis.keys()),
             )
             
             analisis_id = opciones_analisis[analisis_elegido_str]
-            df_cargado_base = cargar_analisis_db(analisis_id)
+            df_cargado_base = cargar_analisis_db(analisis_id, usuario_activo)
             
             if df_cargado_base is not None:
-                st.success(f"Análisis cargado correctamente.")
+                st.success("Análisis cargado correctamente.")
                 
-                # Conmutador para el análisis histórico
                 unidad_medida_hist = st.radio(
                     "🔄 Unidad de visualización para el análisis histórico:",
                     options=["% wt (Porcentaje en Peso)", "ppm (Partes por Millón)"],
@@ -717,59 +761,50 @@ with tab_historico:
                 
                 st.dataframe(df_hist_display, use_container_width=True)
                 
-                # Descargar Excel de la consulta histórica
-                output_h = io.BytesIO()
-                with pd.ExcelWriter(output_h, engine="openpyxl") as writer:
-                    df_hist_display.to_excel(
-                        writer, index=False, sheet_name="Resultados_Guardados"
-                    )
-                excel_bytes_h = output_h.getvalue()
+                excel_bytes_h = generar_excel_proyecto(df_cargado_base, df_hist_display)
 
                 st.download_button(
-                    label="📥 Exportar Análisis Recuperado a Excel",
+                    label="📥 Exportar Consulta a Excel",
                     data=excel_bytes_h,
-                    file_name=f"Analisis_Guardado_{'ppm' if es_ppm_hist else 'pct'}.xlsx",
+                    file_name=f"Resultados_Guardados_{usuario_activo}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key="dl_hist_excel",
                 )
-                
-                # Gráfico interactivo para datos históricos
-                st.divider()
-                st.subheader(f"📈 Gráfico del Análisis Recuperado {suff_hist}")
-                cols_metales_hist = [c for c in df_hist_display.columns if suff_hist in c]
-                
-                if cols_metales_hist:
-                    nombres_metales_h = [c.replace(f" {suff_hist}", "") for c in cols_metales_hist]
-                    metales_sel_h = st.multiselect(
-                        "Selecciona metales para graficar:",
-                        options=nombres_metales_h,
-                        default=nombres_metales_h[: min(5, len(nombres_metales_h))],
-                        key="ms_hist",
-                    )
-                    
-                    if metales_sel_h:
-                        cols_graficar_h = [f"{m} {suff_hist}" for m in metales_sel_h]
-                        df_plot_h = df_hist_display.set_index("Sample Name")[cols_graficar_h]
-                        df_plot_h.columns = [c.replace(f" {suff_hist}", "") for c in df_plot_h.columns]
-                        
-                        fig_h, ax_h = plt.subplots(figsize=(10, 5), dpi=100)
-                        num_m_h = len(metales_sel_h)
-                        cmap_h = matplotlib.colormaps["turbo"].resampled(num_m_h)
-                        
-                        df_plot_h.plot(
-                            kind="bar",
-                            ax=ax_h,
-                            width=0.7,
-                            edgecolor="black",
-                            linewidth=0.5,
-                            colormap=cmap_h,
-                        )
-                        
-                        ax_h.set_ylabel(f"Concentración {suff_hist}", fontsize=10, fontweight="bold")
-                        ax_h.set_title(f"Concentración Elemental - {analisis_elegido_str}", fontsize=12, fontweight="bold")
-                        ax_h.grid(axis="y", linestyle="--", alpha=0.6)
-                        plt.xticks(rotation=45, ha="right")
-                        fig_h.tight_layout()
-                        
-                        st.pyplot(fig_h)
-                        plt.close(fig_h)
+
+
+# ==========================================
+# PESTAÑA 3: CARGAR PROYECTO EXCEL (PORTÁTIL)
+# ==========================================
+with tab_cargar_excel:
+    st.subheader("📥 Reanalizar desde un Archivo Excel Local")
+    st.caption("Sube un archivo de proyecto `.xlsx` descargado previamente de esta app para volver a examinarlo sin necesidad de usar la base de datos.")
+
+    file_excel_proyecto = st.file_uploader(
+        "Cargar Archivo Excel de Proyecto ICP-MS:", type=["xlsx"]
+    )
+
+    if file_excel_proyecto is not None:
+        df_excel_loaded = cargar_desde_excel_proyecto(file_excel_proyecto)
+        if df_excel_loaded is not None:
+            st.success("¡Proyecto Excel cargado con éxito!")
+            
+            unidad_medida_ex = st.radio(
+                "🔄 Unidad de visualización:",
+                options=["% wt (Porcentaje en Peso)", "ppm (Partes por Millón)"],
+                horizontal=True,
+                key="radio_excel_tab",
+            )
+            es_ppm_ex = "ppm" in unidad_medida_ex
+            
+            df_ex_display = df_excel_loaded.copy()
+            cols_pct_ex = [c for c in df_excel_loaded.columns if "% wt" in c]
+            
+            if es_ppm_ex and cols_pct_ex:
+                for c in cols_pct_ex:
+                    elem_name = c.replace(" (% wt)", "")
+                    df_ex_display[f"{elem_name} (ppm)"] = df_ex_display[c] * 10000.0
+                    df_ex_display.drop(columns=[c], inplace=True)
+                suff_ex = "(ppm)"
+            else:
+                suff_ex = "(% wt)"
+            
+            st.dataframe(df_ex_display, use_container_width=True)
