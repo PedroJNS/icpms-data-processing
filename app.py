@@ -1,4 +1,3 @@
-"""
 ===============================================================================
 Aplicación: Analizador ICP-MS - Concentración (% wt / ppm)
 Desarrollador original: Pedro J. Navarrete Segado (Universidad de Jaén - UJA)
@@ -69,7 +68,7 @@ TEXTS = {
         "unit_selector": "🔄 Unidad de visualización de resultados:",
         "upload_file": "1. Cargar Documento ICP-MS (Excel / CSV de Agilent)",
         "select_samples": "2. Selecciona las muestras a analizar:",
-        "select_blanks": "3. Selecciona los Blancos para restar:",
+        "select_blanks": "3. Selecciona los Blancos para restar (puedes elegir cualquier medida):",
         "warn_select_sample": "⚠️ Selecciona al menos una muestra para continuar.",
         "digestion_params": "4. Parámetros de Digestión (Masa y Volumen)",
         "params_hint": "💡 **Pista:** Puedes editar los valores de Masa (mg) y Volumen (mL) directamente en la tabla:",
@@ -112,7 +111,7 @@ TEXTS = {
         "unit_selector": "🔄 Display unit for results:",
         "upload_file": "1. Upload ICP-MS File (Agilent Excel / CSV)",
         "select_samples": "2. Select samples to analyze:",
-        "select_blanks": "3. Select Blank samples for subtraction:",
+        "select_blanks": "3. Select Blank samples for subtraction (you can select any measurement):",
         "warn_select_sample": "⚠️ Select at least one sample to proceed.",
         "digestion_params": "4. Digestion Parameters (Mass & Volume)",
         "params_hint": "💡 **Tip:** Edit Mass (mg) and Volume (mL) directly in the table below:",
@@ -554,9 +553,9 @@ with tab_analisis:
             
             cols_interes = preparar_mapeo_columnas(df_raw, fila_encabezado, col_sample_idx)
 
-            palabras_ignorar = [
-                "blank", "blanco", "ppb", "calblk", "calstd", "blkvrfy",
-                "qc", "driftchk", "cicspike", "isostd", "dilstd", "bkgnd", "fqblk",
+            palabras_ignorar_muestras = [
+                "ppb", "calblk", "calstd", "blkvrfy",
+                "qc", "driftchk", "cicspike", "isostd", "dilstd", "bkgnd", "fqblk"
             ]
 
             if col_type_idx is not None and fila_encabezado is not None:
@@ -568,19 +567,25 @@ with tab_analisis:
             todas_muestras = df_muestras_raw.iloc[:, col_sample_idx].dropna().astype(str).tolist()
 
             muestras_validas = []
-            blancos_detectados = []
+            blancos_detectados_defecto = []
 
             for m in todas_muestras:
                 m_clean = m.strip()
                 m_lower = m_clean.lower()
                 if m_clean and m_lower != "nan":
-                    if "blank" in m_lower or "blanco" in m_lower:
-                        blancos_detectados.append(m_clean)
-                    elif not any(p in m_lower for p in palabras_ignorar):
+                    # Muestras filtradas excluyendo solo estándares/QC técnicos
+                    if not any(p in m_lower for p in palabras_ignorar_muestras):
                         muestras_validas.append(m_clean)
+                    
+                    # Detectar cuáles son blancos predeterminados por el nombre
+                    if "blank" in m_lower or "blanco" in m_lower:
+                        blancos_detectados_defecto.append(m_clean)
 
             muestras_validas = list(dict.fromkeys(muestras_validas))
-            blancos_detectados = list(dict.fromkeys(blancos_detectados))
+            blancos_detectados_defecto = list(dict.fromkeys(blancos_detectados_defecto))
+
+            # Las muestras iniciales a analizar serán las que no se detectaron como blancos
+            muestras_defecto = [m for m in muestras_validas if m not in blancos_detectados_defecto]
 
             st.divider()
             col_sel1, col_sel2 = st.columns(2)
@@ -589,14 +594,15 @@ with tab_analisis:
                 muestras_elegidas = st.multiselect(
                     t["select_samples"],
                     options=muestras_validas,
-                    default=muestras_validas,
+                    default=muestras_defecto if muestras_defecto else muestras_validas,
                 )
 
             with col_sel2:
+                # Se permite elegir CUALQUIER muestra de la lista como blanco
                 blancos_seleccionados = st.multiselect(
                     t["select_blanks"],
-                    options=blancos_detectados,
-                    default=blancos_detectados,
+                    options=muestras_validas,
+                    default=blancos_detectados_defecto,
                 )
 
             if not muestras_elegidas:
@@ -699,7 +705,7 @@ with tab_analisis:
                     type="primary",
                 )
 
-                # --- SECCIÓN GRÁFICA CORREGIDA ---
+                # --- SECCIÓN GRÁFICA ---
                 st.divider()
                 st.subheader(f"{t['chart_title']} {suff}")
 
@@ -771,24 +777,27 @@ with tab_historico:
         st.subheader(f"📂 Análisis Guardados de {usuario_act}")
         lista_analisis = obtener_analisis_usuario(usuario_act)
         if lista_analisis:
-            opciones = {f"{a[1]} ({a[2]})": a[0] for a[a] in lista_analisis} if len(lista_analisis) > 0 and isinstance(lista_analisis[0], tuple) else {f"{a[1]} ({a[2]})": a[0] for a in lista_analisis}
+            opciones = {f"{a[1]} ({a[2]})": a[0] for a in lista_analisis}
             item_sel = st.selectbox("Selecciona un análisis para cargar:", list(opciones.keys()))
             if item_sel:
                 analisis_id = opciones[item_sel]
                 df_cargado = cargar_analisis_db(analisis_id, usuario_act)
                 if df_cargado is not None:
+                    st.success(f"Análisis '{item_sel}' cargado correctamente.")
                     st.dataframe(df_cargado, use_container_width=True)
+                else:
+                    st.error("No se pudo cargar los detalles del análisis.")
         else:
             st.info("No tienes análisis guardados aún.")
     else:
-        st.warning(t["login_req_save"])
+        st.warning("Inicia sesión para consultar tu historial privado.")
 
 # --- PESTAÑA 3: CARGAR PROYECTO EXCEL ---
 with tab_cargar_excel:
     st.subheader(t["tab_load_excel"])
-    uploaded_proj = st.file_uploader("Selecciona un archivo Excel de proyecto exportado anteriormente:", type=["xlsx"])
-    if uploaded_proj:
-        df_proj = cargar_desde_excel_proyecto(uploaded_proj)
+    excel_uploaded = st.file_uploader("Subir proyecto Excel procesado anteriormente (.xlsx)", type=["xlsx"])
+    if excel_uploaded is not None:
+        df_proj = cargar_desde_excel_proyecto(excel_uploaded)
         if df_proj is not None:
-            st.success("¡Proyecto cargado con éxito!")
+            st.success("Proyecto cargado exitosamente.")
             st.dataframe(df_proj, use_container_width=True)
