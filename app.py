@@ -69,8 +69,8 @@ TEXTS = {
         "select_samples": "2. Selecciona las muestras a analizar:",
         "select_blanks": "3. Selecciona los Blancos para restar (puedes elegir cualquier medida):",
         "warn_select_sample": "⚠️ Selecciona al menos una muestra para continuar.",
-        "digestion_params": "4. Parámetros de Digestión (Masa y Volumen)",
-        "params_hint": "💡 **Pista:** Puedes editar los valores de Masa (mg) y Volumen (mL) directamente en la tabla:",
+        "digestion_params": "4. Parámetros de Digestión y Nombres de Muestras",
+        "params_hint": "💡 **Pista:** Puedes editar el **Nombre**, la **Masa (mg)** y el **Volumen (mL)** directamente en la tabla:",
         "results_table": "📊 Tabla de Resultados",
         "save_analysis_title": "💾 Guardar Análisis en Base de Datos",
         "analysis_name_label": "Nombre del Análisis / Proyecto:",
@@ -112,8 +112,8 @@ TEXTS = {
         "select_samples": "2. Select samples to analyze:",
         "select_blanks": "3. Select Blank samples for subtraction (you can select any measurement):",
         "warn_select_sample": "⚠️ Select at least one sample to proceed.",
-        "digestion_params": "4. Digestion Parameters (Mass & Volume)",
-        "params_hint": "💡 **Tip:** Edit Mass (mg) and Volume (mL) directly in the table below:",
+        "digestion_params": "4. Digestion Parameters & Sample Renaming",
+        "params_hint": "💡 **Tip:** Edit **Name**, **Mass (mg)** and **Volume (mL)** directly in the table below:",
         "results_table": "📊 Results Table",
         "save_analysis_title": "💾 Save Analysis to Database",
         "analysis_name_label": "Analysis / Project Name:",
@@ -411,18 +411,22 @@ def calcular_resultados(df_data, cols_interes, col_sample_idx, muestras_elegidas
     col_serie = df_data.iloc[:, col_sample_idx].astype(str).str.strip()
     df_filt = df_data[col_serie.isin(muestras_elegidas)].copy()
 
-    params_dict = df_params.set_index("Sample Name").to_dict(orient="index")
+    params_dict = df_params.set_index("Sample Original").to_dict(orient="index")
 
     filas_export = []
     for _, fila in df_filt.iterrows():
-        nombre_muestra = str(fila.iloc[col_sample_idx]).strip()
-        p_m = params_dict.get(nombre_muestra, {"Masa (mg)": 15.0, "Volumen (mL)": 10.0})
+        nombre_original = str(fila.iloc[col_sample_idx]).strip()
+        p_m = params_dict.get(
+            nombre_original,
+            {"Nombre Muestra": nombre_original, "Masa (mg)": 15.0, "Volumen (mL)": 10.0}
+        )
 
+        nombre_custom = str(p_m.get("Nombre Muestra", nombre_original)).strip() or nombre_original
         masa_mg = float(p_m["Masa (mg)"])
         vol_ml = float(p_m["Volumen (mL)"])
 
         row_dict = {
-            "Sample Name": nombre_muestra,
+            "Sample Name": nombre_custom,
             "Masa (mg)": masa_mg,
             "Volumen (mL)": vol_ml,
         }
@@ -572,36 +576,51 @@ with tab_analisis:
                 m_clean = m.strip()
                 m_lower = m_clean.lower()
                 if m_clean and m_lower != "nan":
-                    # Muestras filtradas excluyendo solo estándares/QC técnicos
                     if not any(p in m_lower for p in palabras_ignorar_muestras):
                         muestras_validas.append(m_clean)
                     
-                    # Detectar cuáles son blancos predeterminados por el nombre
                     if "blank" in m_lower or "blanco" in m_lower:
                         blancos_detectados_defecto.append(m_clean)
 
             muestras_validas = list(dict.fromkeys(muestras_validas))
             blancos_detectados_defecto = list(dict.fromkeys(blancos_detectados_defecto))
 
-            # Las muestras iniciales a analizar serán las que no se detectaron como blancos
             muestras_defecto = [m for m in muestras_validas if m not in blancos_detectados_defecto]
 
             st.divider()
+            
+            st.write("### 📌 Selección de Muestras y Blancos")
+            col_b1, col_b2 = st.columns(2)
+            with col_b1:
+                if st.button("✅ Seleccionar todas las muestras", key="btn_all_samples"):
+                    st.session_state["sel_samples_key"] = muestras_validas
+                if st.button("❌ Desmarcar todas las muestras", key="btn_none_samples"):
+                    st.session_state["sel_samples_key"] = []
+            with col_b2:
+                if st.button("✅ Seleccionar todos los blancos", key="btn_all_blanks"):
+                    st.session_state["sel_blanks_key"] = muestras_validas
+                if st.button("❌ Desmarcar todos los blancos", key="btn_none_blanks"):
+                    st.session_state["sel_blanks_key"] = []
+
+            if "sel_samples_key" not in st.session_state:
+                st.session_state["sel_samples_key"] = muestras_defecto if muestras_defecto else muestras_validas
+            if "sel_blanks_key" not in st.session_state:
+                st.session_state["sel_blanks_key"] = blancos_detectados_defecto
+
             col_sel1, col_sel2 = st.columns(2)
 
             with col_sel1:
                 muestras_elegidas = st.multiselect(
                     t["select_samples"],
                     options=muestras_validas,
-                    default=muestras_defecto if muestras_defecto else muestras_validas,
+                    key="sel_samples_key"
                 )
 
             with col_sel2:
-                # Se permite elegir CUALQUIER muestra de la lista como blanco
                 blancos_seleccionados = st.multiselect(
                     t["select_blanks"],
                     options=muestras_validas,
-                    default=blancos_detectados_defecto,
+                    key="sel_blanks_key"
                 )
 
             if not muestras_elegidas:
@@ -611,8 +630,10 @@ with tab_analisis:
                 st.subheader(t["digestion_params"])
                 st.info(t["params_hint"])
 
+                # Edición de Nombre Personalizado
                 df_params_init = pd.DataFrame({
-                    "Sample Name": muestras_elegidas,
+                    "Sample Original": muestras_elegidas,
+                    "Nombre Muestra": muestras_elegidas,
                     "Masa (mg)": [15.0] * len(muestras_elegidas),
                     "Volumen (mL)": [10.0] * len(muestras_elegidas),
                 })
@@ -622,9 +643,12 @@ with tab_analisis:
                     num_rows="fixed",
                     use_container_width=True,
                     column_config={
+                        "Sample Original": st.column_config.TextColumn(disabled=True),
+                        "Nombre Muestra": st.column_config.TextColumn(required=True),
                         "Masa (mg)": st.column_config.NumberColumn(min_value=0.001, format="%.2f"),
                         "Volumen (mL)": st.column_config.NumberColumn(min_value=0.001, format="%.2f"),
                     },
+                    hide_index=True,
                 )
 
                 df_results_base = calcular_resultados(
@@ -711,15 +735,29 @@ with tab_analisis:
                 cols_metales = [c for c in df_results_display.columns if suff in c]
 
                 if cols_metales:
-                    col_g1, col_g2 = st.columns([1, 3])
+                    nombres_metales = [c.replace(f" {suff}", "") for c in cols_metales]
+                    
+                    if "sel_metals_key" not in st.session_state:
+                        st.session_state["sel_metals_key"] = nombres_metales[: min(5, len(nombres_metales))]
+
+                    col_g1, col_g2 = st.columns([2, 3])
 
                     with col_g1:
                         usar_log = st.checkbox(t["use_log"], value=False)
-                        nombres_metales = [c.replace(f" {suff}", "") for c in cols_metales]
+                        
+                        st.write("**Metales a graficar:**")
+                        col_btn_m1, col_btn_m2 = st.columns(2)
+                        with col_btn_m1:
+                            if st.button("✅ Marcar todos", key="btn_all_metals"):
+                                st.session_state["sel_metals_key"] = nombres_metales
+                        with col_btn_m2:
+                            if st.button("❌ Desmarcar todos", key="btn_none_metals"):
+                                st.session_state["sel_metals_key"] = []
+
                         metales_sel = st.multiselect(
                             t["select_metals"],
                             options=nombres_metales,
-                            default=nombres_metales[: min(5, len(nombres_metales))],
+                            key="sel_metals_key"
                         )
 
                     with col_g2:
