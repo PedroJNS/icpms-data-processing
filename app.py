@@ -1,10 +1,9 @@
-===============================================================================
-Aplicación: Analizador ICP-MS - Concentración (% wt / ppm)
-Desarrollador original: Pedro J. Navarrete Segado (Universidad de Jaén - UJA)
-Contacto: pnsegado@ujaen.es
-Licencia: GNU General Public License v3.0 (GPL-3.0)
-===============================================================================
-"""
+# ===============================================================================
+# Aplicación: Analizador ICP-MS - Concentración (% wt / ppm)
+# Desarrollador original: Pedro J. Navarrete Segado (Universidad de Jaén - UJA)
+# Contacto: pnsegado@ujaen.es
+# Licencia: GNU General Public License v3.0 (GPL-3.0)
+# ===============================================================================
 
 import io
 import os
